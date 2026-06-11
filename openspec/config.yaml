@@ -1,0 +1,34 @@
+schema: spec-driven
+
+context: |
+  舆情爬虫 v9 — Flask + Patchright CDP 控制 Chrome，爬取黑猫投诉与小红书。
+  产品延伸（partner-risk-intel）：合作方名单监测、多源可扩展情报平台；
+  黑猫/小红书为首批 Source 插件；统一 IntelRecord + 高召回云模型 + 看板/API 交付；
+  业务系统对 source 自行加权。存储 SQLite，监测任务先手动触发，API 内网无鉴权。
+  主要模块：
+  - crawler_web.py — Web API、爬取入口、全局状态 S
+  - login_gate.py — 黑猫/小红书共用登录门禁与 wait_for_site_login
+  - heimao_session.py — 黑猫 sid、微博 SSO 登录页
+  - xhs_detail.py — 小红书搜索页弹窗详情抓取
+  - auth_utils.py — Cookie 注入/导出、登录检测
+  - reports.py — 黑猫 structure_heimao_record
+  - config.py / config.json — 站点、auth、sources、analysis 配置
+  Chrome 用户目录：chrome_heimao_profile，CDP 9222。
+  登录等待：S.phase=waiting_login，UI 横幅 + /api/status.login_wait。
+  小红书详情：点击 note-item 打开弹窗，禁止直接 goto explore 触发 App 墙。
+  情报管道（规划）：SourceRegistry → CrawlAdapter/NormalizeAdapter → PartnerMatcher
+  → AnalyzePipeline → intel_records（SQLite）→ 看板 / 导出 / /api/intel/*。
+
+rules:
+  proposal:
+    - 说明影响站点（heimao / xhs / 共用 login_gate）
+    - 列出 config.json 中新增或变更的 auth.* / xhs.* / heimao.* 字段
+  design:
+    - 引用实际模块文件名（login_gate.py、xhs_detail.py 等）
+    - 区分「任务开始门禁」「搜索页二次门禁」「详情弹窗」三条路径
+  specs:
+    - 使用「当/则/且」场景表述；与代码不一致时以代码为准并更新 spec
+  tasks:
+    - 手动验证项单独列出（未登录等待、登录续跑、弹窗详情）
+    - 实现完成后同步更新根目录 代码说明.md（见 .cursor/rules/code-guide-sync.mdc）
+    - 待验证汇总：openspec/verification-pending.md；完成后 `python scripts/sync_verification_tasks.py push` 写回 archive tasks.md

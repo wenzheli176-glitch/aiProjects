@@ -1,0 +1,341 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 5000
+  },
+  "chrome": {
+    "exe_path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "cdp_port": 9222,
+    "profile_dir": "chrome_heimao_profile",
+    "startup_url": "https://tousu.sina.com.cn/",
+    "extra_args": [
+      "--remote-allow-origins=*",
+      "--no-first-run",
+      "--no-default-browser-check"
+    ],
+    "kill_all_chrome_before_start": false,
+    "kill_process_name": "chrome.exe",
+    "kill_wait_seconds": 3,
+    "startup_wait_seconds": 30,
+    "ready_extra_wait_seconds": 2,
+    "cdp_check_timeout": 3,
+    "cdp_http_timeout": 2
+  },
+  "paths": {
+    "output_dir": ""
+  },
+  "logging": {
+    "max_logs": 300,
+    "status_log_count": 30
+  },
+  "auth": {
+    "heimao": {
+      "login_url": "https://tousu.sina.com.cn/",
+      "weibo_login_url": "https://passport.weibo.com/sso/signin?entry=general&source=heimao&url=https%3A%2F%2Ftousu.sina.com.cn%2F",
+      "login_check_url": "https://tousu.sina.com.cn/",
+      "login_ok_selector": "input[placeholder*=\"搜索\"]",
+      "login_fail_texts": [
+        "请登录",
+        "登录后查看",
+        "立即登录"
+      ],
+      "cookies_file": "credentials/heimao_cookies.json",
+      "cookies": [],
+      "cookies_text": "",
+      "domain": ".sina.com.cn",
+      "use_profile_only": false,
+      "cookie_export_urls": [
+        "https://tousu.sina.com.cn/",
+        "https://weibo.com/",
+        "https://passport.weibo.cn/",
+        "https://passport.weibo.com/"
+      ],
+      "cookie_export_domains": [
+        ".sina.com.cn",
+        ".weibo.com",
+        ".weibo.cn",
+        ".passport.weibo.com",
+        ".passport.weibo.cn"
+      ],
+      "required_cookie_names": [],
+      "check_timeout_ms": 20000,
+      "require_login": false,
+      "wait_timeout_sec": 300,
+      "poll_interval_sec": 3,
+      "auto_export_after_login": true,
+      "detail_probe_enabled": true,
+      "detail_probe_url": "",
+      "detail_probe_wait_sec": 2,
+      "skip_inject_if_browser_logged_out": true
+    },
+    "xhs": {
+      "login_url": "https://www.xiaohongshu.com/",
+      "login_check_url": "https://www.xiaohongshu.com/explore",
+      "login_ok_selector": "#global > div.header-container",
+      "login_fail_texts": [
+        "登录后查看",
+        "扫码登录",
+        "手机号登录",
+        "马上登录",
+        "登录探索",
+        "立即登录",
+        "请先登录",
+        "登录解锁"
+      ],
+      "cookies_file": "credentials/xhs_cookies.json",
+      "cookies": [],
+      "cookies_text": "",
+      "domain": ".xiaohongshu.com",
+      "use_profile_only": false,
+      "cookie_export_urls": [
+        "https://www.xiaohongshu.com/"
+      ],
+      "required_cookie_names": [
+        "web_session",
+        "webId"
+      ],
+      "check_timeout_ms": 20000,
+      "require_login": false,
+      "skip_inject_if_browser_logged_out": true,
+      "wait_timeout_sec": 300,
+      "poll_interval_sec": 3,
+      "auto_export_after_login": true,
+      "detail_probe_min_content_len": 20
+    }
+  },
+  "heimao": {
+    "source_name": "黑猫投诉",
+    "default_keyword": "小米",
+    "default_max_pages": 2,
+    "default_fetch_detail": true,
+    "base_url": "https://tousu.sina.com.cn/",
+    "search_url_template": "https://tousu.sina.com.cn/index/search/?keywords={keyword}&t={page}",
+    "search_input_selector": "input[placeholder*=\"搜索\"]",
+    "link_regex": "<a\\s+[^>]*href=\"([^\"]*tousu\\.sina\\.com\\.cn/complaint/view/[^\"]*)\"[^>]*>(.*?)</a>",
+    "min_link_text_len": 15,
+    "min_html_len": 1000,
+    "page_timeout_ms": 30000,
+    "after_goto_wait": 2,
+    "after_search_wait": 5,
+    "page_wait_min": 3,
+    "page_wait_max": 5,
+    "between_pages_min": 3,
+    "between_pages_max": 6,
+    "detail_wait_min": 5,
+    "detail_wait_max": 8,
+    "typing_delay_min": 80,
+    "typing_delay_max": 150,
+    "title_max_len": 100,
+    "list_title_preview_len": 40,
+    "normalize": {
+      "include_reply_in_body": true,
+      "include_merchant_in_body": true,
+      "include_problem_in_body": true,
+      "body_max_chars": 0,
+      "strip_whitespace": true
+    },
+    "parse_strip_text": "于黑猫投诉平台发起",
+    "parse_demand_pattern": "\\[投诉要求\\]([^\\[]+)",
+    "detail": {
+      "author_cats": [
+        "机灵喵",
+        "洞察喵",
+        "友爱喵",
+        "正义喵",
+        "勇敢喵",
+        "诚实喵"
+      ],
+      "time_keyword": "发布于",
+      "time_slice_len": 30,
+      "get_after_max_len": 200,
+      "merchant_keyword": "投诉对象",
+      "problem_keyword": "投诉问题",
+      "demand_keyword": "投诉要求",
+      "amount_keyword": "涉诉金额",
+      "status_done": "投诉已完成",
+      "status_done_label": "已完成",
+      "status_replied": "已回复",
+      "status_replied_label": "已回复",
+      "status_processing": "处理中",
+      "status_processing_label": "处理中",
+      "content_start": "于黑猫投诉平台发起",
+      "content_start_offset": 15,
+      "content_end_markers": [
+        "声明",
+        "未经授权"
+      ],
+      "content_max_fallback": 3000,
+      "reply_start": "解决方案",
+      "reply_end": "申请完成",
+      "reply_max_fallback": 500,
+      "reply_trim_prefix": 3
+    }
+  },
+  "xhs": {
+    "source_name": "小红书",
+    "default_keyword": "小米",
+    "default_max_pages": 3,
+    "default_fetch_detail": true,
+    "search_url_template": "https://www.xiaohongshu.com/search_result?keyword={keyword}&type=1",
+    "link_host": "https://www.xiaohongshu.com",
+    "note_item_selector": ".note-item",
+    "link_selector": "a[href*=\"explore\"]",
+    "title_selector": ".title",
+    "text_selector": ".text",
+    "time_selector": ".author .time",
+    "author_selector": ".author .name",
+    "likes_selector": ".count",
+    "scroll_times_per_page": 3,
+    "scroll_pixels": 1500,
+    "scroll_wait_seconds": 2,
+    "page_timeout_ms": 30000,
+    "after_goto_wait": 5,
+    "search_results_wait_ms": 12000,
+    "between_pages_min": 5,
+    "between_pages_max": 10,
+    "title_max_len": 100,
+    "title_preview_len": 40,
+    "normalize": {
+      "body_max_chars": 0,
+      "fallback_title_from_body": true,
+      "include_likes_in_extra": true,
+      "strip_whitespace": true
+    },
+    "detail_wait_min": 4,
+    "detail_wait_max": 7,
+    "detail_open_wait_ms": 3500,
+    "detail_modal_root_selectors": [
+      "#noteContainer",
+      ".note-detail-mask",
+      "[class*=\"note-detail\"]",
+      ".reds-modal"
+    ],
+    "detail_modal_scroll_selectors": [
+      "#noteContainer .note-scroller",
+      ".interaction-container"
+    ],
+    "detail_modal_close_selectors": [
+      ".close-circle",
+      ".close-box"
+    ],
+    "detail_app_open_texts": [
+      "App 内打开",
+      "在 App 内打开",
+      "打开小红书",
+      "前往 App",
+      "扫码下载"
+    ],
+    "detail": {
+      "title_selectors": [
+        "#detail-title",
+        ".note-content .title",
+        ".title",
+        "h1"
+      ],
+      "content_selectors": [
+        "#detail-desc",
+        ".note-text",
+        ".desc",
+        ".content"
+      ],
+      "author_selectors": [
+        ".username",
+        ".author-wrapper .name",
+        ".user-name"
+      ],
+      "time_selectors": [
+        ".date",
+        ".publish-date",
+        ".bottom-container .time"
+      ],
+      "likes_selectors": [
+        ".like-wrapper .count",
+        "[class*=\"like\"] .count"
+      ],
+      "collects_selectors": [
+        ".collect-wrapper .count"
+      ],
+      "comments_selectors": [
+        ".chat-wrapper .count",
+        "[class*=\"comment\"] .count"
+      ],
+      "tags_selectors": [
+        "#hash-tag",
+        ".tag",
+        "a.tag"
+      ]
+    }
+  },
+  "export": {
+    "csv_header": "序号,标题,商家,问题,金额,时间,状态,诉求,投诉内容,商家回复,链接",
+    "content_max_len": 500,
+    "reply_max_len": 300,
+    "txt_fields": [
+      "merchant",
+      "problem",
+      "amount",
+      "time",
+      "status",
+      "demand",
+      "author",
+      "content",
+      "reply"
+    ]
+  },
+  "database": {
+    "path": "data/intel.db"
+  },
+  "sources": {
+    "heimao": {
+      "enabled": true,
+      "label": "黑猫投诉"
+    },
+    "xhs": {
+      "enabled": true,
+      "label": "小红书"
+    }
+  },
+  "monitor": {
+    "default_sources": [
+      "heimao",
+      "xhs"
+    ],
+    "default_max_pages": 2,
+    "task_timeout_sec": 7200,
+    "scheduler_enabled": true,
+    "scheduler_timezone": "Asia/Shanghai"
+  },
+  "analysis": {
+    "provider": "minimax",
+    "endpoint": "https://api.minimaxi.com/v1/chat/completions",
+    "endpoint_intl": "https://api.minimax.io/v1/chat/completions",
+    "model": "MiniMax-M3",
+    "api_key_env": "MINIMAX_API_KEY",
+    "api_key": "",
+    "prompt_version": "v1-high-recall-minimax-m3",
+    "active_prompt_id": "default-high-recall",
+    "batch_size": 10,
+    "max_body_chars": 2000,
+    "max_retries": 2,
+    "retry_delay_sec": 2,
+    "temperature": 0.3,
+    "timeout_sec": 180,
+    "mock_without_key": false,
+    "mock_default_relevance": "medium",
+    "system_prompt": "",
+    "extra_body": {
+      "reasoning_split": true
+    }
+  },
+  "intel": {
+    "schema_version": "1.1"
+  },
+  "admin": {
+    "enabled": true,
+    "password_env": "ADMIN_PASSWORD",
+    "password_hash": "",
+    "session_secret_env": "ADMIN_SESSION_SECRET",
+    "session_secret": "",
+    "session_ttl_hours": 8
+  }
+}

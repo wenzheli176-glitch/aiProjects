@@ -1,0 +1,18 @@
+{
+  "project": {
+    "name": "舆情爬虫",
+    "description": "舆情爬虫 v9 - 黑猫投诉 + 小红书爬取系统",
+    "tools": {
+      "allowed": ["Read", "Edit", "Bash", "Glob", "Grep", "WebFetch", "WebSearch"],
+      "disallowed": []
+    },
+    "mcpServers": {
+      "filesystem": {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:\\AIProjects\\projects\\舆情爬虫-pkg"],
+        "env": {}
+      }
+    }
+  }
+}

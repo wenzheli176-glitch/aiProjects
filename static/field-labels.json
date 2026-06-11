@@ -1,0 +1,648 @@
+{
+  "fields": {
+    "source_name": {
+      "label": "来源名称",
+      "group": "crawl",
+      "type": "text",
+      "help": ""
+    },
+    "default_keyword": {
+      "label": "默认关键词",
+      "group": "crawl",
+      "type": "text",
+      "help": ""
+    },
+    "default_max_pages": {
+      "label": "默认采集页数",
+      "group": "crawl",
+      "type": "number",
+      "help": ""
+    },
+    "default_fetch_detail": {
+      "label": "默认抓取详情",
+      "group": "crawl",
+      "type": "checkbox",
+      "help": ""
+    },
+    "page_timeout_ms": {
+      "label": "页面超时",
+      "group": "crawl",
+      "type": "number",
+      "help": "毫秒"
+    },
+    "after_goto_wait": {
+      "label": "打开页等待",
+      "group": "crawl",
+      "type": "number",
+      "help": "秒"
+    },
+    "after_search_wait": {
+      "label": "搜索后等待",
+      "group": "crawl",
+      "type": "number",
+      "help": "秒"
+    },
+    "page_wait_min": {
+      "label": "翻页等待下限",
+      "group": "crawl",
+      "type": "number",
+      "help": "秒"
+    },
+    "page_wait_max": {
+      "label": "翻页等待上限",
+      "group": "crawl",
+      "type": "number",
+      "help": "秒"
+    },
+    "between_pages_min": {
+      "label": "页间间隔下限",
+      "group": "crawl",
+      "type": "number",
+      "help": "秒"
+    },
+    "between_pages_max": {
+      "label": "页间间隔上限",
+      "group": "crawl",
+      "type": "number",
+      "help": "秒"
+    },
+    "title_max_len": {
+      "label": "标题最大长度",
+      "group": "crawl",
+      "type": "number",
+      "help": ""
+    },
+    "base_url": {
+      "label": "首页 URL",
+      "group": "crawl",
+      "type": "text",
+      "help": ""
+    },
+    "search_url_template": {
+      "label": "搜索 URL 模板",
+      "group": "crawl",
+      "type": "text",
+      "help": "占位符: {keyword} {page}"
+    },
+    "search_input_selector": {
+      "label": "搜索框选择器",
+      "group": "crawl",
+      "type": "text",
+      "help": ""
+    },
+    "link_regex": {
+      "label": "列表链接正则",
+      "group": "crawl",
+      "type": "text",
+      "help": ""
+    },
+    "detail_wait_min": {
+      "label": "详情等待下限",
+      "group": "crawl",
+      "type": "number",
+      "help": "秒"
+    },
+    "detail_wait_max": {
+      "label": "详情等待上限",
+      "group": "crawl",
+      "type": "number",
+      "help": "秒"
+    },
+    "min_link_text_len": {
+      "label": "链接最短文本",
+      "group": "crawl",
+      "type": "number",
+      "help": ""
+    },
+    "min_html_len": {
+      "label": "HTML 最短长度",
+      "group": "crawl",
+      "type": "number",
+      "help": ""
+    },
+    "link_host": {
+      "label": "链接域名",
+      "group": "crawl",
+      "type": "text",
+      "help": ""
+    },
+    "note_item_selector": {
+      "label": "笔记项选择器",
+      "group": "crawl",
+      "type": "text",
+      "help": ""
+    },
+    "link_selector": {
+      "label": "链接选择器",
+      "group": "crawl",
+      "type": "text",
+      "help": ""
+    },
+    "title_selector": {
+      "label": "标题选择器",
+      "group": "crawl",
+      "type": "text",
+      "help": ""
+    },
+    "text_selector": {
+      "label": "正文选择器",
+      "group": "crawl",
+      "type": "text",
+      "help": ""
+    },
+    "time_selector": {
+      "label": "时间选择器",
+      "group": "crawl",
+      "type": "text",
+      "help": ""
+    },
+    "author_selector": {
+      "label": "作者选择器",
+      "group": "crawl",
+      "type": "text",
+      "help": ""
+    },
+    "likes_selector": {
+      "label": "点赞选择器",
+      "group": "crawl",
+      "type": "text",
+      "help": ""
+    },
+    "scroll_times_per_page": {
+      "label": "每页滚动次数",
+      "group": "crawl",
+      "type": "number",
+      "help": ""
+    },
+    "scroll_pixels": {
+      "label": "每次滚动像素",
+      "group": "crawl",
+      "type": "number",
+      "help": ""
+    },
+    "scroll_wait_seconds": {
+      "label": "滚动后等待",
+      "group": "crawl",
+      "type": "number",
+      "help": "秒"
+    },
+    "include_reply_in_body": {
+      "label": "正文含回复",
+      "group": "normalize",
+      "type": "checkbox",
+      "help": ""
+    },
+    "include_merchant_in_body": {
+      "label": "正文含商户",
+      "group": "normalize",
+      "type": "checkbox",
+      "help": ""
+    },
+    "include_problem_in_body": {
+      "label": "正文含问题描述",
+      "group": "normalize",
+      "type": "checkbox",
+      "help": ""
+    },
+    "body_max_chars": {
+      "label": "正文最大字符",
+      "group": "normalize",
+      "type": "number",
+      "help": "0 表示不截断"
+    },
+    "strip_whitespace": {
+      "label": "合并空行",
+      "group": "normalize",
+      "type": "checkbox",
+      "help": ""
+    },
+    "fallback_title_from_body": {
+      "label": "无标题时用正文前缀",
+      "group": "normalize",
+      "type": "checkbox",
+      "help": ""
+    },
+    "include_likes_in_extra": {
+      "label": "extra 含点赞数",
+      "group": "normalize",
+      "type": "checkbox",
+      "help": ""
+    },
+    "provider": {
+      "label": "服务商",
+      "group": "analysis",
+      "type": "text",
+      "help": ""
+    },
+    "endpoint": {
+      "label": "API Endpoint（国内）",
+      "group": "analysis",
+      "type": "text",
+      "help": ""
+    },
+    "endpoint_intl": {
+      "label": "API Endpoint（国际）",
+      "group": "analysis",
+      "type": "text",
+      "help": ""
+    },
+    "model": {
+      "label": "模型名称",
+      "group": "analysis",
+      "type": "text",
+      "help": ""
+    },
+    "prompt_version": {
+      "label": "Prompt 版本标识",
+      "group": "analysis",
+      "type": "text",
+      "help": ""
+    },
+    "api_key_env": {
+      "label": "API Key 环境变量",
+      "group": "analysis",
+      "type": "text",
+      "help": ""
+    },
+    "api_key": {
+      "label": "API Key",
+      "group": "analysis",
+      "type": "password",
+      "help": ""
+    },
+    "batch_size": {
+      "label": "批大小",
+      "group": "analysis",
+      "type": "number",
+      "help": ""
+    },
+    "max_body_chars": {
+      "label": "正文最大字符",
+      "group": "analysis",
+      "type": "number",
+      "help": ""
+    },
+    "max_retries": {
+      "label": "失败重试次数",
+      "group": "analysis",
+      "type": "number",
+      "help": ""
+    },
+    "retry_delay_sec": {
+      "label": "重试间隔",
+      "group": "analysis",
+      "type": "number",
+      "help": "秒"
+    },
+    "temperature": {
+      "label": "Temperature",
+      "group": "analysis",
+      "type": "number",
+      "help": ""
+    },
+    "timeout_sec": {
+      "label": "请求超时",
+      "group": "analysis",
+      "type": "number",
+      "help": "秒"
+    },
+    "mock_without_key": {
+      "label": "无 Key 时 Mock",
+      "group": "analysis",
+      "type": "checkbox",
+      "help": ""
+    },
+    "mock_default_relevance": {
+      "label": "Mock 默认相关度",
+      "group": "analysis",
+      "type": "text",
+      "help": ""
+    },
+    "extra_body": {
+      "label": "扩展参数 extra_body",
+      "group": "analysis",
+      "type": "text",
+      "help": ""
+    },
+    "system_prompt": {
+      "label": "System Prompt",
+      "group": "analysis",
+      "type": "text",
+      "help": ""
+    },
+    "active_prompt_id": {
+      "label": "活跃 Prompt 模板",
+      "group": "analysis",
+      "type": "text",
+      "help": ""
+    },
+    "host": {
+      "label": "Web 监听地址",
+      "group": "server",
+      "type": "text",
+      "help": ""
+    },
+    "port": {
+      "label": "Web 端口",
+      "group": "server",
+      "type": "number",
+      "help": ""
+    },
+    "exe_path": {
+      "label": "Chrome 路径",
+      "group": "server",
+      "type": "text",
+      "help": ""
+    },
+    "cdp_port": {
+      "label": "CDP 调试端口",
+      "group": "server",
+      "type": "number",
+      "help": ""
+    },
+    "profile_dir": {
+      "label": "Chrome 用户目录",
+      "group": "server",
+      "type": "text",
+      "help": ""
+    },
+    "startup_url": {
+      "label": "Chrome 启动页",
+      "group": "server",
+      "type": "text",
+      "help": ""
+    },
+    "output_dir": {
+      "label": "导出目录",
+      "group": "server",
+      "type": "text",
+      "help": ""
+    },
+    "max_logs": {
+      "label": "日志保留条数",
+      "group": "server",
+      "type": "number",
+      "help": ""
+    },
+    "published_at": {
+      "label": "发布时间",
+      "group": "intel",
+      "type": "text",
+      "help": ""
+    },
+    "captured_at": {
+      "label": "采集时间",
+      "group": "intel",
+      "type": "text",
+      "help": ""
+    },
+    "analyzed_at": {
+      "label": "生成时间",
+      "group": "intel",
+      "type": "text",
+      "help": ""
+    },
+    "partner_name": {
+      "label": "合作方",
+      "group": "intel",
+      "type": "text",
+      "help": ""
+    },
+    "relevance": {
+      "label": "相关度",
+      "group": "intel",
+      "type": "text",
+      "help": ""
+    },
+    "sentiment_label": {
+      "label": "情感",
+      "group": "intel",
+      "type": "text",
+      "help": ""
+    },
+    "risk_types": {
+      "label": "风险类型",
+      "group": "intel",
+      "type": "text",
+      "help": ""
+    },
+    "summary": {
+      "label": "摘要",
+      "group": "intel",
+      "type": "text",
+      "help": ""
+    },
+    "url": {
+      "label": "链接",
+      "group": "intel",
+      "type": "text",
+      "help": ""
+    },
+    "task_timeout_sec": {
+      "label": "任务超时",
+      "group": "monitor",
+      "type": "number",
+      "help": "秒"
+    },
+    "default_sources": {
+      "label": "默认来源",
+      "group": "monitor",
+      "type": "text",
+      "help": ""
+    },
+    "scheduler_enabled": {
+      "label": "启用调度器",
+      "group": "monitor",
+      "type": "boolean",
+      "help": ""
+    },
+    "scheduler_timezone": {
+      "label": "调度时区",
+      "group": "monitor",
+      "type": "text",
+      "help": ""
+    },
+    "schedule_enabled": {
+      "label": "启用定时",
+      "group": "monitor",
+      "type": "boolean",
+      "help": ""
+    },
+    "schedule_frequency": {
+      "label": "执行频率",
+      "group": "monitor",
+      "type": "text",
+      "help": ""
+    },
+    "schedule_time": {
+      "label": "执行时间",
+      "group": "monitor",
+      "type": "text",
+      "help": ""
+    },
+    "schedule_weekdays": {
+      "label": "执行星期",
+      "group": "monitor",
+      "type": "text",
+      "help": ""
+    },
+    "trigger": {
+      "label": "触发方式",
+      "group": "monitor_run",
+      "type": "text",
+      "help": "manual=手动执行，schedule=定时触发"
+    },
+    "analyze_mode": {
+      "label": "分析模式",
+      "group": "monitor_run",
+      "type": "text",
+      "help": "incremental=增量，full_replace=全量重分析"
+    },
+    "status": {
+      "label": "Run 状态",
+      "group": "monitor_run",
+      "type": "text",
+      "help": "running/done/failed/skipped_overlap"
+    },
+    "started_at": {
+      "label": "开始时间",
+      "group": "monitor_run",
+      "type": "text",
+      "help": ""
+    },
+    "finished_at": {
+      "label": "结束时间",
+      "group": "monitor_run",
+      "type": "text",
+      "help": ""
+    },
+    "crawl_duration_ms": {
+      "label": "爬取阶段耗时",
+      "group": "monitor_run",
+      "type": "number",
+      "help": "毫秒，各 source crawl 之和的 wall time"
+    },
+    "analyze_duration_ms": {
+      "label": "分析阶段耗时",
+      "group": "monitor_run",
+      "type": "number",
+      "help": "毫秒，LLM 批次 wall time"
+    },
+    "error_message": {
+      "label": "错误信息",
+      "group": "monitor_run",
+      "type": "text",
+      "help": "失败或跳过时摘要"
+    },
+    "raw_new": {
+      "label": "新增 Raw",
+      "group": "monitor_run",
+      "type": "number",
+      "help": "本次 run 新入库的 raw 条数"
+    },
+    "raw_updated": {
+      "label": "更新 Raw",
+      "group": "monitor_run",
+      "type": "number",
+      "help": "payload 变化导致更新的 raw 条数"
+    },
+    "raw_unchanged": {
+      "label": "未变 Raw",
+      "group": "monitor_run",
+      "type": "number",
+      "help": "content 未变跳过的 raw 条数"
+    },
+    "intel_written": {
+      "label": "写入情报",
+      "group": "monitor_run",
+      "type": "number",
+      "help": "新写入 intel 条数"
+    },
+    "intel_replaced": {
+      "label": "覆盖情报",
+      "group": "monitor_run",
+      "type": "number",
+      "help": "payload 更新后覆盖重写的 intel 条数"
+    },
+    "intel_skipped": {
+      "label": "跳过情报",
+      "group": "monitor_run",
+      "type": "number",
+      "help": "dedup 等原因未写入的条数"
+    },
+    "crawl_ms": {
+      "label": "爬取耗时",
+      "group": "monitor_run",
+      "type": "number",
+      "help": "该 source 爬取 wall time（毫秒）"
+    },
+    "analyze_ms": {
+      "label": "分析耗时",
+      "group": "monitor_run",
+      "type": "number",
+      "help": "该 source 分摊的分析 wall time（毫秒）"
+    },
+    "prompt_tokens": {
+      "label": "Prompt Tokens",
+      "group": "monitor_run",
+      "type": "number",
+      "help": "输入 token 数"
+    },
+    "completion_tokens": {
+      "label": "Completion Tokens",
+      "group": "monitor_run",
+      "type": "number",
+      "help": "输出 token 数"
+    },
+    "total_tokens": {
+      "label": "Total Tokens",
+      "group": "monitor_run",
+      "type": "number",
+      "help": "本 run 或 source 合计 token"
+    }
+  },
+  "elementIds": {
+    "aiProvider": "provider",
+    "aiEndpoint": "endpoint",
+    "aiEndpointIntl": "endpoint_intl",
+    "aiModel": "model",
+    "aiPromptVer": "prompt_version",
+    "aiKeyEnv": "api_key_env",
+    "aiKey": "api_key",
+    "aiBatch": "batch_size",
+    "aiBodyMax": "max_body_chars",
+    "aiRetries": "max_retries",
+    "aiRetryDelay": "retry_delay_sec",
+    "aiTemp": "temperature",
+    "aiTimeout": "timeout_sec",
+    "aiExtraBody": "extra_body",
+    "aiSystemPrompt": "system_prompt",
+    "cfg-server-host": "host",
+    "cfg-server-port": "port",
+    "cfg-chrome-exe": "exe_path",
+    "cfg-chrome-port": "cdp_port",
+    "cfg-chrome-profile": "profile_dir",
+    "cfg-chrome-startup": "startup_url",
+    "cfg-output-dir": "output_dir",
+    "cfg-max-logs": "max_logs",
+    "cfg-h-kw": "default_keyword",
+    "cfg-h-pages": "default_max_pages",
+    "cfg-h-source": "source_name",
+    "cfg-h-base": "base_url",
+    "cfg-h-search-tpl": "search_url_template",
+    "cfg-h-search-sel": "search_input_selector",
+    "cfg-h-timeout": "page_timeout_ms",
+    "cfg-x-kw": "default_keyword",
+    "cfg-x-pages": "default_max_pages",
+    "cfg-x-source": "source_name",
+    "cfg-x-search-tpl": "search_url_template",
+    "cfg-x-note-sel": "note_item_selector",
+    "cfg-x-link-sel": "link_selector",
+    "cfg-x-title-sel": "title_selector",
+    "cfg-x-text-sel": "text_selector",
+    "cfg-x-scroll-px": "scroll_pixels",
+    "cfg-x-scroll-times": "scroll_times_per_page",
+    "monDefaultPages": "default_max_pages",
+    "monTaskTimeout": "task_timeout_sec"
+  }
+}

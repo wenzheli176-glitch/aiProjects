@@ -1,0 +1,166 @@
+# 情报 API 对接说明
+
+面向内网业务系统对接 **IntelRecord**。读接口（GET）内网开放；**写接口**（配置、合作方、任务 CRUD、源 PATCH）需先 `POST /api/admin/login`（`config.admin.enabled=true` 时）。开发模式可设 `admin.enabled=false`。
+
+## 管理员鉴权
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/admin/login` | `{password}`，成功 Set-Cookie |
+| POST | `/admin/logout` | 清除 Session |
+| GET | `/admin/session` | `{logged_in, role, auth_enabled}` |
+
+环境变量：`ADMIN_PASSWORD`（默认读取名见 `config.admin.password_env`）
+
+## 数据源
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/sources?detail=1` | 含 enabled/registered/profile_keys；`notice` 说明不可 UI 加源 |
+| PATCH | `/sources/{id}` | 管理员：`{enabled, label}` |
+| GET/PATCH | `/sources/{id}/profile` | CrawlProfile 白名单字段；PATCH 需管理员 |
+| GET/PATCH | `/monitor/defaults` | 默认源/页数/超时 |
+
+## 基础 URL
+
+默认：`http://<host>:5000/api`
+
+## 核心概念
+
+- **source**：数据来源 ID（`heimao` | `xhs` | …），业务系统据此设置权重
+- **relevance**：AI 相关度 `high` | `medium` | `low` | `noise`（高召回策略，存疑多为 `medium`）
+- **export_tier**：`include` | `review` | `exclude`
+- **schema_version**：IntelRecord 导出 schema，当前 `1.1`（含情感分数字段）
+
+本 API **不包含** `weighted_score`、`final_risk` 等决策字段。
+
+## 合作方
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/partners` | 名单列表，`?enabled_only=1` 仅启用 |
+| POST | `/partners` | 创建（**需管理员**） |
+| PUT | `/partners/{id}` | 更新（**需管理员**） |
+| DELETE | `/partners/{id}` | 删除（**需管理员**） |
+
+## 监测任务（手动 / 定时）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/monitor/tasks` | 任务列表（含 `schedule`、`last_run`、`next_run_at`） |
+| POST | `/monitor/tasks` | 创建（**需管理员**）`{name, partner_ids[], sources[], max_pages, fetch_detail, schedule?}` |
+| GET | `/monitor/tasks/{id}` | 任务详情与状态 |
+| PUT | `/monitor/tasks/{id}` | 更新（**需管理员**），可含 `schedule` |
+| DELETE | `/monitor/tasks/{id}` | 删除（**需管理员**） |
+| GET | `/monitor/tasks/{id}/runs` | Run 历史（分页） |
+| GET | `/monitor/runs/{run_id}` | Run 详情（分源 timing/token） |
+| POST | `/monitor/run` | 执行 `{task_id, analyze_mode?: incremental\|full_replace}` |
+| POST | `/monitor/reanalyze` | 重跑 AI `{task_id, analyze_mode: incremental\|full_replace}`（`replace` 仍映射 full_replace） |
+
+`schedule` 对象：`{enabled, cron, timezone, preset_id, skip_if_running}`。Cron 由 Web UI 生成，不建议手改。
+
+任务状态：`queued` → `crawling` → `analyzing` → `done` | `failed`（含超时：`error_message` 含「任务超时」，上限 `monitor.task_timeout_sec`，默认 7200 秒）
+
+## 情报记录
+
+### GET `/intel/records`
+
+Query 参数：
+
+| 参数 | 说明 |
+|------|------|
+| task_id | 监测任务 ID |
+| partner_id | 合作方 ID |
+| source | 数据源 |
+| relevance_min | 最低相关度（如 `medium` 表示 medium+） |
+| since | ISO 时间，采集时间不早于此 |
+| risk_type | 风险类型子串匹配 |
+| page / page_size | 分页，默认 50，最大 500 |
+
+响应：
+
+```json
+{
+  "ok": true,
+  "total": 120,
+  "page": 1,
+  "page_size": 50,
+  "records": [
+    {
+      "id": 1,
+      "task_id": 3,
+      "partner_id": 1,
+      "partner_name": "示例合作方",
+      "source": "heimao",
+      "url": "https://...",
+      "title": "...",
+      "body": "...",
+      "published_at": "...",
+      "captured_at": "...",
+      "analyzed_at": "...",
+      "relevance": "medium",
+      "risk_types": ["投诉维权"],
+      "summary": "...",
+      "schema_version": "1.0",
+      "prompt_version": "v1-high-recall",
+      "model": "gpt-4o-mini"
+    }
+  ]
+}
+```
+
+### GET `/intel/export`
+
+- `format=json|xlsx|csv`
+- 支持与 `/intel/records` 相同的过滤参数
+- JSON 含顶层 `schema_version` 与 `records[]`（含 `published_at`、`captured_at`、`analyzed_at`）
+
+### Prompt 模板（SQLite）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/analysis/prompts` | 列表 |
+| GET | `/analysis/prompts/{id}` | 详情含 body |
+| POST | `/analysis/prompts` | 新建（管理员） |
+| PUT | `/analysis/prompts/{id}` | 更新（管理员） |
+| POST | `/analysis/prompts/{id}/activate` | 设为当前（管理员） |
+| DELETE | `/analysis/prompts/{id}` | 删除非 builtin（管理员） |
+
+### 时间字段语义（BREAKING 文档）
+
+- `captured_at`：原始数据入库时间（`raw_records.created_at`），**非** AI 分析时刻
+- `analyzed_at`：情报生成时间（等同 `created_at`）
+- `published_at`：舆情内容发布时间（尽力解析）
+
+## 数据源列表
+
+### GET `/sources`
+
+返回已注册且 `config.sources.*.enabled=true` 的源。
+
+## 权重外置
+
+对接方示例逻辑（伪代码）：
+
+```
+score = relevance_to_number(record.relevance) * business_weight[record.source]
+```
+
+`relevance` 枚举建议映射：`high=3, medium=2, low=1, noise=0`（由业务方定义，非本系统字段）。
+
+## 云模型与复现
+
+每条记录含 `prompt_version`、`model`。同一批数据 + 同一 prompt 版本应可复现（受模型供应商更新影响）。
+
+### 配置方式
+
+| 方式 | 说明 |
+|------|------|
+| 看板 → **大模型配置** | 可视化编辑，保存至 `config.json` 的 `analysis.*` |
+| 爬虫控制台 → **系统配置 → 大模型** | 同上 |
+| `GET/POST /api/analysis/config` | 程序化读写（GET 不返回明文 api_key） |
+| 环境变量 | `analysis.api_key_env` 指定变量名（默认 `MINIMAX_API_KEY`） |
+
+可配置项：`endpoint`、`model`、`api_key` / `api_key_env`、`prompt_version`、`batch_size`、`max_body_chars`、`max_retries`、`retry_delay_sec`、`temperature`、`timeout_sec`、`mock_without_key`、`mock_default_relevance`、`system_prompt`（支持 `{partner_name}` `{aliases}` 占位符）。
+
+未配置 API Key 且 `mock_without_key=true` 时，系统使用 mock 打标，便于联调。
