@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""监测任务编排：partner × source 爬取 → 归一化 → 匹配 → AI 分析。"""
+"""监测任务编排：legacy partner×source 或 Stage2 list_first 共享池。"""
 import hashlib
 import time
 
@@ -9,6 +9,7 @@ from intel.db import (
     clear_intel_for_task,
     create_analysis_job,
     create_task_run,
+    fail_running_analysis_jobs,
     finish_task_run,
     get_monitor_task,
     get_partner,
@@ -17,9 +18,14 @@ from intel.db import (
     list_raw_records,
     update_task_status,
 )
-from intel.matcher import export_tier_for_match, match_best_partner
+from intel.error_util import format_exception
+from intel.investigation import build_investigation_queue, run_investigation_crawl
+from intel.keyword_batch import build_keyword_batches, sort_batches_by_quota
+from intel.matcher import export_tier_for_match, match_all_partners, match_best_partner
+from intel.priority import refresh_auto_priorities
 from intel.registry import registry
 from intel.run_metrics import RunMetrics
+from intel.triage import run_list_triage
 
 
 def _dedup_key(normalized):
@@ -40,11 +46,35 @@ def _get_enabled_partners(task):
     return [p for p in partners if p and p.get('enabled', True)]
 
 
-def _build_candidates_from_raw(task_id, partners, analyze_mode='incremental', run_metrics=None):
+def _should_analyze_raw(row, shared_pool=False):
+    if not shared_pool:
+        return True
+    phase = row.get('crawl_phase') or 'legacy'
+    if phase == 'detail':
+        return True
+    triage = row.get('list_triage') or {}
+    rel = triage.get('triage_relevance') or ''
+    if phase == 'list' and rel == 'noise':
+        return False
+    if phase == 'list' and not triage:
+        return False
+    return phase in ('legacy', 'detail')
+
+
+def _build_candidates_from_raw(
+    task_id,
+    partners,
+    analyze_mode='incremental',
+    run_metrics=None,
+    shared_pool=False,
+):
     candidates_by_partner = {}
     raw_rows = list_raw_records(task_id)
     analysis_state = get_raw_analysis_state(task_id) if analyze_mode == 'incremental' else {}
+
     for row in raw_rows:
+        if shared_pool and not _should_analyze_raw(row, shared_pool=True):
+            continue
         if analyze_mode == 'incremental':
             st = analysis_state.get(row['id']) or {}
             if st.get('has_intel'):
@@ -54,15 +84,24 @@ def _build_candidates_from_raw(task_id, partners, analyze_mode='incremental', ru
                     if run_metrics:
                         run_metrics.record_intel_skipped(1)
                     continue
+
         source_id = row['source']
         try:
             normalizer = registry.get_normalizer(source_id)
         except KeyError:
             continue
-        normalized = normalizer.normalize(row['payload'])
-        partner = get_partner(row['partner_id']) if row['partner_id'] else partners[0]
-        match = match_best_partner(normalized, [partner], default_partner_id=row['partner_id'])
-        tier = export_tier_for_match(match)
+        payload = dict(row.get('payload') or {})
+        payload['_anchor_at'] = row.get('updated_at') or row.get('created_at') or ''
+        normalized = normalizer.normalize(payload)
+
+        if shared_pool and not row.get('partner_id'):
+            matches = match_all_partners(normalized, partners)
+            if not matches:
+                matches = [match_best_partner(normalized, partners)]
+        else:
+            partner = get_partner(row['partner_id']) if row['partner_id'] else partners[0]
+            matches = [match_best_partner(normalized, [partner], default_partner_id=row['partner_id'])]
+
         replace_intel = False
         if analyze_mode == 'incremental':
             st = analysis_state.get(row['id']) or {}
@@ -71,45 +110,54 @@ def _build_candidates_from_raw(task_id, partners, analyze_mode='incremental', ru
                 intel_at = st.get('analyzed_at') or ''
                 if raw_upd > intel_at:
                     replace_intel = True
-        cand = {
-            'id': row['id'],
-            'raw_record_id': row['id'],
-            'source': normalized.get('source'),
-            'url': normalized.get('url'),
-            'title': normalized.get('title'),
-            'body': normalized.get('body'),
-            'published_at': normalized.get('published_at'),
-            'captured_at': row.get('created_at') or '',
-            'partner_id': match.get('partner_id'),
-            'partner_name': match.get('partner_name'),
-            'subject_hits': match.get('subject_hits'),
-            'export_tier': tier,
-            'dedup_key': _dedup_key(normalized),
-            'extra': normalized.get('extra') or {},
-            'replace_intel': replace_intel,
-        }
-        pid = match.get('partner_id') or 0
-        candidates_by_partner.setdefault(pid, {'partner': partner, 'items': []})
-        candidates_by_partner[pid]['items'].append(cand)
+
+        for match in matches:
+            if not match.get('partner_id'):
+                continue
+            partner = get_partner(match['partner_id']) or partners[0]
+            tier = export_tier_for_match(match)
+            cand = {
+                'id': row['id'],
+                'raw_record_id': row['id'],
+                'source': normalized.get('source'),
+                'url': normalized.get('url'),
+                'title': normalized.get('title'),
+                'body': normalized.get('body'),
+                'published_at': normalized.get('published_at'),
+                'captured_at': row.get('created_at') or '',
+                'partner_id': match.get('partner_id'),
+                'partner_name': match.get('partner_name'),
+                'subject_hits': match.get('subject_hits'),
+                'export_tier': tier,
+                'dedup_key': _dedup_key(normalized),
+                'extra': normalized.get('extra') or {},
+                'replace_intel': replace_intel,
+            }
+            pid = match.get('partner_id') or 0
+            group = candidates_by_partner.setdefault(pid, {'partner': partner, 'items': []})
+            group['partner'] = partner
+            group['items'].append(cand)
     return candidates_by_partner
 
 
-def _check_task_timeout(task_id, deadline, timeout_sec, log_fn=None):
-    from crawler_web import S
+def _timeout_message(timeout_sec):
+    return '任务超时（task_timeout_sec=%d）' % int(timeout_sec)
 
-    if time.monotonic() < deadline:
-        return False
-    S.running = False
-    msg = '任务超时（task_timeout_sec=%d）' % int(timeout_sec)
-    update_task_status(
-        task_id,
-        'failed',
-        error_message=msg,
-        progress={'reason': 'timeout', 'phase': 'timeout'},
-    )
+
+def _fail_task(task_id, run_id, err_msg, log_fn=None, phase=''):
+    update_task_status(task_id, 'failed', error_message=err_msg)
+    fail_running_analysis_jobs(task_id, run_id=run_id, error_message=err_msg)
     if log_fn:
-        log_fn('[monitor] %s' % msg, 'WARN')
-    return True
+        head = err_msg.splitlines()[0] if err_msg else 'unknown'
+        log_fn('监测任务失败%s: %s' % ((' (%s)' % phase if phase else ''), head), 'ERROR')
+        if '\n' in err_msg:
+            log_fn(err_msg, 'ERROR')
+
+
+def _fail_from_exception(task_id, run_id, exc, log_fn=None, phase=''):
+    err_msg = format_exception(exc)
+    _fail_task(task_id, run_id, err_msg, log_fn=log_fn, phase=phase)
+    return err_msg
 
 
 def _run_analysis_phase(
@@ -120,13 +168,18 @@ def _run_analysis_phase(
     run_metrics=None,
     log_fn=None,
     timeout_check=None,
+    shared_pool=False,
 ):
     if analyze_mode == 'full_replace':
         clear_intel_for_task(task_id)
         if log_fn:
             log_fn('[monitor] 全量重分析：已清除旧情报')
     candidates_by_partner = _build_candidates_from_raw(
-        task_id, partners, analyze_mode=analyze_mode, run_metrics=run_metrics,
+        task_id,
+        partners,
+        analyze_mode=analyze_mode,
+        run_metrics=run_metrics,
+        shared_pool=shared_pool,
     )
     ac = cfg('analysis') or {}
     job_id = create_analysis_job(
@@ -174,6 +227,145 @@ def _finish_run(run_id, run_metrics, status='done', error_message=''):
         finish_task_run(run_id, status=status, error_message=error_message, metrics=run_metrics)
 
 
+def _run_legacy_crawl(task_id, task, partners, sources, crawl_ctx, run_metrics, run_id, log_fn, timeout_check):
+    from crawler_web import S
+
+    total_steps = len(partners) * len(sources)
+    step = 0
+    for partner in partners:
+        for source_id in sources:
+            if timeout_check():
+                return False
+            if not S.running:
+                return False
+            step += 1
+            update_task_status(
+                task_id,
+                'crawling',
+                progress={
+                    'phase': 'crawl',
+                    'done': step - 1,
+                    'total': total_steps,
+                    'current': source_id,
+                    'run_id': run_id,
+                },
+            )
+            try:
+                crawler = registry.get_crawler(source_id)
+            except KeyError as e:
+                if log_fn:
+                    log_fn(str(e), 'WARN')
+                continue
+            keyword = partner.get('name') or ''
+            if log_fn:
+                log_fn('[monitor] %s / %s' % (partner.get('name'), source_id))
+            t0 = time.monotonic()
+            raw_list = crawler.crawl(crawl_ctx, task, partner, {
+                'max_pages': task.get('max_pages'),
+                'fetch_detail': task.get('fetch_detail'),
+            })
+            crawl_ms = int((time.monotonic() - t0) * 1000)
+            run_metrics.add_crawl_ms(source_id, crawl_ms)
+            ins = insert_raw_records(
+                task_id, partner['id'], source_id, keyword, raw_list or [],
+                run_metrics=run_metrics, crawl_phase='legacy',
+            )
+            if log_fn and any(ins.get(k) for k in ('inserted', 'updated', 'unchanged')):
+                parts = []
+                if ins.get('inserted'):
+                    parts.append('新增 %d' % ins['inserted'])
+                if ins.get('updated'):
+                    parts.append('更新 %d' % ins['updated'])
+                if ins.get('unchanged'):
+                    parts.append('未变 %d' % ins['unchanged'])
+                log_fn('[monitor] raw %s' % ' · '.join(parts))
+    return True
+
+
+def _run_list_first_pipeline(
+    task_id, task, partners, sources, crawl_ctx, run_metrics, run_id, log_fn, timeout_check,
+):
+    from crawler_web import S
+
+    refresh_auto_priorities()
+    batches = sort_batches_by_quota(build_keyword_batches(partners))
+    total_steps = len(batches) * len(sources)
+    step = 0
+
+    update_task_status(
+        task_id, 'crawling',
+        progress={'phase': 'list_crawl', 'done': 0, 'total': total_steps, 'run_id': run_id},
+    )
+
+    for batch in batches:
+        for source_id in sources:
+            if timeout_check() or not S.running:
+                return False
+            step += 1
+            update_task_status(
+                task_id, 'crawling',
+                progress={
+                    'phase': 'list_crawl',
+                    'done': step - 1,
+                    'total': total_steps,
+                    'current': source_id,
+                    'cohort': batch.get('cohort'),
+                    'run_id': run_id,
+                },
+            )
+            try:
+                crawler = registry.get_crawler(source_id)
+            except KeyError as e:
+                if log_fn:
+                    log_fn(str(e), 'WARN')
+                continue
+            if not hasattr(crawler, 'crawl_list_batch'):
+                if log_fn:
+                    log_fn('[monitor] %s 无 crawl_list_batch，跳过' % source_id, 'WARN')
+                continue
+            kw_label = ','.join((batch.get('keywords') or [])[:2])
+            if log_fn:
+                log_fn('[monitor] list %s / %s [%s]' % (batch.get('cohort'), source_id, kw_label))
+            t0 = time.monotonic()
+            raw_list = crawler.crawl_list_batch(crawl_ctx, task, batch, {
+                'max_pages': task.get('max_pages'),
+            })
+            crawl_ms = int((time.monotonic() - t0) * 1000)
+            run_metrics.add_crawl_ms(source_id, crawl_ms)
+            insert_raw_records(
+                task_id, None, source_id, kw_label, raw_list or [],
+                run_metrics=run_metrics, crawl_phase='list',
+            )
+
+    update_task_status(task_id, 'analyzing', progress={'phase': 'list_triage', 'run_id': run_id})
+    raw_rows = list_raw_records(task_id)
+    triage_result = run_list_triage(
+        task_id, raw_rows, partners, log_fn=log_fn, run_metrics=run_metrics,
+    )
+    if log_fn:
+        log_fn('[monitor] 列表初筛 %d 条' % triage_result.get('processed', 0))
+
+    business_spec = task.get('business_spec') or {}
+    queued = build_investigation_queue(
+        task_id, partners, business_spec=business_spec, log_fn=log_fn,
+    )
+    run_metrics.stats['investigation_queued'] = queued
+
+    update_task_status(
+        task_id, 'crawling',
+        progress={'phase': 'investigation_crawl', 'queued': queued, 'run_id': run_id},
+    )
+    inv_result = run_investigation_crawl(
+        task_id, crawl_ctx, task, run_metrics=run_metrics,
+        log_fn=log_fn, timeout_check=timeout_check,
+    )
+    if log_fn:
+        log_fn('[monitor] 勘察完成 %d / 失败 %d' % (
+            inv_result.get('done', 0), inv_result.get('failed', 0),
+        ))
+    return True
+
+
 def reanalyze_monitor_task(
     task_id,
     log_fn=None,
@@ -182,7 +374,6 @@ def reanalyze_monitor_task(
     trigger='manual',
     run_id=None,
 ):
-    """仅基于已有 raw_records 重新 AI 分析，不重新爬取。"""
     from crawler_web import S
 
     if analyze_mode is None:
@@ -201,6 +392,7 @@ def reanalyze_monitor_task(
         update_task_status(task_id, 'failed', error_message='无有效合作方')
         return 0
 
+    shared = (task.get('crawl_mode') or 'legacy') == 'list_first'
     run_metrics = RunMetrics()
     if not run_id:
         run_id = create_task_run(task_id, trigger=trigger, analyze_mode=analyze_mode)
@@ -223,6 +415,7 @@ def reanalyze_monitor_task(
             run_id=run_id,
             run_metrics=run_metrics,
             log_fn=log_fn,
+            shared_pool=shared,
         )
         update_task_status(
             task_id,
@@ -234,10 +427,13 @@ def reanalyze_monitor_task(
         return total_written
     except Exception as e:
         final_status = 'failed'
-        err_msg = str(e)[:200]
+        err_msg = format_exception(e)
         update_task_status(task_id, 'failed', error_message=err_msg)
+        fail_running_analysis_jobs(task_id, run_id=run_id, error_message=err_msg)
         if log_fn:
-            log_fn('AI 分析失败: %s' % str(e)[:120], 'ERROR')
+            log_fn('AI 分析失败: %s' % err_msg.splitlines()[0], 'ERROR')
+            if '\n' in err_msg:
+                log_fn(err_msg, 'ERROR')
         raise
     finally:
         _finish_run(run_id, run_metrics, status=final_status, error_message=err_msg)
@@ -251,6 +447,7 @@ def run_monitor_task(
     trigger='manual',
     analyze_mode='incremental',
     run_id=None,
+    business_spec=None,
 ):
     from crawler_web import S, close_cdp, prepare_browser_for_crawl
 
@@ -266,31 +463,54 @@ def run_monitor_task(
         update_task_status(task_id, 'failed', error_message='无有效合作方')
         return
 
+    if business_spec and isinstance(business_spec, dict):
+        task = dict(task)
+        merged = dict(task.get('business_spec') or {})
+        merged.update(business_spec)
+        task['business_spec'] = merged
+
+    crawl_mode = task.get('crawl_mode') or 'legacy'
+    shared_pool = crawl_mode == 'list_first'
+
     run_metrics = RunMetrics()
     if not run_id:
         run_id = create_task_run(task_id, trigger=trigger, analyze_mode=analyze_mode)
 
     sources = task.get('sources') or []
-    crawl_ctx = {'log': log_fn, 'monitor_active': True}
     timeout_sec = int(cfg('monitor', 'task_timeout_sec', default=7200) or 7200)
-    deadline = time.monotonic() + timeout_sec
+    analysis_reserve = int(cfg('monitor', 'analysis_timeout_sec', default=3600) or 3600)
+    analysis_reserve = max(300, min(analysis_reserve, max(600, timeout_sec - 300)))
+    task_started = time.monotonic()
+    deadline = task_started + timeout_sec
+    crawl_deadline = max(task_started + 300, deadline - analysis_reserve)
     timed_out = False
     final_status = 'done'
     err_msg = ''
 
-    def timeout_check():
-        nonlocal timed_out
-        if _check_task_timeout(task_id, deadline, timeout_sec, log_fn):
-            timed_out = True
-            return True
-        return False
+    def timeout_check(phase='crawl'):
+        nonlocal timed_out, err_msg
+        dl = crawl_deadline if phase == 'crawl' else deadline
+        if time.monotonic() < dl:
+            return False
+        S.running = False
+        timed_out = True
+        err_msg = _timeout_message(timeout_sec)
+        if log_fn:
+            log_fn('[monitor] %s' % err_msg, 'WARN')
+        return True
+
+    crawl_ctx = {
+        'log': log_fn,
+        'monitor_active': True,
+        'timeout_check': lambda: timeout_check('crawl'),
+    }
 
     S.running = True
     S.running_type = 'monitor'
     update_task_status(
         task_id,
         'crawling',
-        progress={'phase': 'crawl', 'done': 0, 'total': 0, 'run_id': run_id},
+        progress={'phase': 'list_crawl' if shared_pool else 'crawl', 'done': 0, 'total': 0, 'run_id': run_id},
     )
 
     try:
@@ -300,70 +520,36 @@ def run_monitor_task(
             update_task_status(task_id, 'failed', error_message=err_msg)
             return
 
-        total_steps = len(partners) * len(sources)
-        step = 0
-        for partner in partners:
-            for source_id in sources:
-                if timeout_check():
-                    break
-                if not S.running:
-                    break
-                step += 1
-                update_task_status(
-                    task_id,
-                    'crawling',
-                    progress={
-                        'phase': 'crawl',
-                        'done': step - 1,
-                        'total': total_steps,
-                        'current': source_id,
-                        'run_id': run_id,
-                    },
-                )
-                try:
-                    crawler = registry.get_crawler(source_id)
-                except KeyError as e:
-                    if log_fn:
-                        log_fn(str(e), 'WARN')
-                    continue
-                keyword = partner.get('name') or ''
-                if log_fn:
-                    log_fn('[monitor] %s / %s' % (partner.get('name'), source_id))
-                t0 = time.monotonic()
-                raw_list = crawler.crawl(crawl_ctx, task, partner, {
-                    'max_pages': task.get('max_pages'),
-                    'fetch_detail': task.get('fetch_detail'),
-                })
-                crawl_ms = int((time.monotonic() - t0) * 1000)
-                run_metrics.add_crawl_ms(source_id, crawl_ms)
-                ins = insert_raw_records(
-                    task_id, partner['id'], source_id, keyword, raw_list or [],
-                    run_metrics=run_metrics,
-                )
-                if log_fn:
-                    parts = []
-                    if ins.get('inserted'):
-                        parts.append('新增 %d' % ins['inserted'])
-                    if ins.get('updated'):
-                        parts.append('更新 %d' % ins['updated'])
-                    if ins.get('unchanged'):
-                        parts.append('未变 %d' % ins['unchanged'])
-                    if parts:
-                        log_fn('[monitor] raw %s' % ' · '.join(parts))
-            if timed_out:
-                break
+        if shared_pool:
+            ok = _run_list_first_pipeline(
+                task_id, task, partners, sources, crawl_ctx, run_metrics, run_id, log_fn, timeout_check,
+            )
+        else:
+            ok = _run_legacy_crawl(
+                task_id, task, partners, sources, crawl_ctx, run_metrics, run_id, log_fn, timeout_check,
+            )
 
-        if timed_out:
+        if not ok:
             final_status = 'failed'
-            err_msg = '任务超时'
-            return
-        if not S.running:
-            final_status = 'failed'
-            err_msg = '任务已停止'
-            update_task_status(task_id, 'failed', error_message=err_msg)
+            if not err_msg:
+                err_msg = '任务超时' if timed_out else '任务已停止'
+            update_task_status(
+                task_id, 'failed', error_message=err_msg,
+                progress={'reason': 'timeout' if timed_out else 'stopped', 'phase': 'crawl'},
+            )
             return
 
-        update_task_status(task_id, 'analyzing', progress={'phase': 'normalize', 'run_id': run_id})
+        # 爬取正常结束：即使 wall-clock 已接近 task_timeout，仍预留分析时间
+        analysis_budget = int(cfg('monitor', 'analysis_timeout_sec', default=3600) or 3600)
+        analysis_budget = max(300, analysis_budget)
+        deadline = time.monotonic() + analysis_budget
+        timed_out = False
+        err_msg = ''
+        S.running = True
+        if log_fn and time.monotonic() - task_started >= timeout_sec - 120:
+            log_fn('[monitor] 爬取完成，预留 %ds 用于 AI 分析' % analysis_budget, 'INFO')
+
+        update_task_status(task_id, 'analyzing', progress={'phase': 'analyze', 'run_id': run_id})
         total_written = _run_analysis_phase(
             task_id,
             partners,
@@ -371,11 +557,17 @@ def run_monitor_task(
             run_id=run_id,
             run_metrics=run_metrics,
             log_fn=log_fn,
-            timeout_check=timeout_check,
+            timeout_check=lambda: timeout_check('analyze'),
+            shared_pool=shared_pool,
         )
         if timed_out:
             final_status = 'failed'
-            err_msg = '任务超时'
+            if not err_msg:
+                err_msg = '任务超时'
+            update_task_status(
+                task_id, 'failed', error_message=err_msg,
+                progress={'reason': 'timeout', 'phase': 'analyze'},
+            )
             return
 
         update_task_status(
@@ -387,10 +579,7 @@ def run_monitor_task(
             log_fn('监测任务完成，情报 %d 条' % total_written)
     except Exception as e:
         final_status = 'failed'
-        err_msg = str(e)[:200]
-        update_task_status(task_id, 'failed', error_message=err_msg)
-        if log_fn:
-            log_fn('监测任务失败: %s' % str(e)[:120], 'ERROR')
+        err_msg = _fail_from_exception(task_id, run_id, e, log_fn=log_fn)
     finally:
         _finish_run(run_id, run_metrics, status=final_status, error_message=err_msg)
         S.running = False

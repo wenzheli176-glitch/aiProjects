@@ -128,10 +128,12 @@ tbody tr:hover td{background:var(--surface-muted)}
 .tag-status.running{background:#dbeafe;color:#1d4ed8}
 .tag-status.skipped_overlap{background:#e2e8f0;color:#64748b}
 .run-history-row td{background:var(--surface-muted);border-top:none;padding:8px 12px 12px}
-.run-history-row .run-summary-table{width:100%;font-size:12px;border-collapse:collapse}
-.run-history-row .run-summary-table th,.run-history-row .run-summary-table td{padding:6px 8px;text-align:left;border-bottom:1px solid var(--border)}
+.run-history-scroll{overflow-x:auto;max-width:100%}
+.run-history-row .run-summary-table{width:100%;min-width:960px;font-size:12px;border-collapse:collapse}
+.run-history-row .run-summary-table th,.run-history-row .run-summary-table td{padding:6px 8px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap}
 .run-history-row .run-summary-table th{color:var(--text-muted);font-weight:600;font-size:11px;background:var(--surface-muted)}
 .run-history-row .run-summary-table td{color:var(--text);background:var(--surface)}
+.run-history-row .run-summary-table td.num{text-align:right;font-variant-numeric:tabular-nums}
 .run-summary-row{cursor:pointer}
 .run-summary-row:hover td{background:var(--accent-soft)}
 .run-summary-row-selected td{background:var(--accent-soft)!important}
@@ -153,8 +155,20 @@ tbody tr:hover td{background:var(--surface-muted)}
 .run-detail-table th{color:var(--text-muted);font-size:11px;font-weight:600;background:var(--surface-muted)}
 .run-detail-table tfoot td{font-weight:600;color:var(--text);border-top:1px solid var(--border)}
 .run-detail-error{background:#fef2f2;border:1px solid #fecaca;border-radius:6px;padding:10px;color:#b91c1c;font-size:12px;white-space:pre-wrap}
-.run-detail-glossary{margin-top:12px;font-size:12px;color:var(--text-muted)}
-.run-detail-glossary summary{cursor:pointer;color:var(--text);margin-bottom:6px}
+.run-detail-error-block{margin:12px 0;border:1px solid #fecaca;border-radius:8px;background:#fef2f2;overflow:hidden}
+.run-detail-error-head{padding:8px 12px;font-size:12px;font-weight:600;color:#991b1b;border-bottom:1px solid #fecaca;background:#fee2e2}
+.run-detail-error-trace{margin:0;padding:10px 12px;font-size:11px;line-height:1.45;color:#7f1d1d;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;font-family:Consolas,Monaco,'Courier New',monospace}
+.run-detail-glossary{margin-top:14px;font-size:12px;color:var(--text-muted)}
+.run-detail-glossary summary{cursor:pointer;color:var(--text);margin-bottom:8px;font-weight:600}
+.run-glossary-groups{display:flex;flex-direction:column;gap:12px}
+.run-glossary-group-title{font-size:11px;font-weight:700;color:var(--text);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px}
+.run-glossary-table{width:100%;border-collapse:collapse;font-size:11px;border:1px solid var(--border);border-radius:6px;overflow:hidden}
+.run-glossary-table th,.run-glossary-table td{padding:6px 8px;text-align:left;border-bottom:1px solid var(--border);vertical-align:top}
+.run-glossary-table th{background:var(--surface-muted);color:var(--text-muted);font-weight:600;font-size:10px}
+.run-glossary-table tr:last-child td{border-bottom:none}
+.run-glossary-table .field-key{width:38%;white-space:nowrap}
+.run-glossary-table code{font-size:10px;color:var(--text)}
+.run-glossary-table .field-help{color:var(--text-muted);line-height:1.35}
 .run-detail-glossary dl{margin:0}
 .run-detail-glossary dt{color:var(--text);font-weight:600;margin-top:8px}
 .run-detail-glossary dd{margin:2px 0 0;color:var(--text-muted);font-size:11px}
@@ -202,6 +216,10 @@ td.truncate{max-width:180px}
 .admin-bar input[type=password]{width:120px;padding:4px 8px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text)}
 .readonly-mode input:not([type=checkbox]):not([type=radio]),.readonly-mode textarea,.readonly-mode select{opacity:.85;pointer-events:none}
 .readonly-mode #adminLoginBox,.readonly-mode #adminLoginBox *{pointer-events:auto;opacity:1}
+/* 只读模式下仍允许列表筛选（浏览/导出，非写操作） */
+.readonly-mode .filter-bar input,
+.readonly-mode .filter-bar select,
+.readonly-mode .filter-bar button{pointer-events:auto;opacity:1;cursor:pointer}
 .readonly-mode .admin-only-save{display:none!important}
 @media(max-width:900px){.app-shell{flex-direction:column}.app-nav{width:100%;display:flex;flex-wrap:wrap;padding:8px}.app-nav a{border-left:none;border-bottom:2px solid transparent;padding:8px 12px}.table-tasks{min-width:760px}.actions-wrap{max-width:200px}}
 

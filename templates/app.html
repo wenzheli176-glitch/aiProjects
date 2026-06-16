@@ -53,19 +53,29 @@
     <div id="panel-intel" class="app-panel">
     <div id="intelListView">
       <div class="filter-bar filters">
-        <div class="field"><label>监测任务</label><select id="fTask" onchange="onTaskFilterChange()"><option value="">全部任务</option></select></div>
-        <div class="field"><label>合作方</label><select id="fPartner"><option value="">全部</option></select></div>
-        <div class="field"><label>来源</label><select id="fSource"><option value="">全部</option></select></div>
+        <div class="field"><label>监测任务</label><select id="fTask" onchange="onIntelFilterChange()"><option value="">全部任务</option></select></div>
+        <div class="field"><label>合作方</label><select id="fPartner" onchange="onIntelFilterChange()"><option value="">全部</option></select></div>
+        <div class="field"><label>来源</label><select id="fSource" onchange="onIntelFilterChange()"><option value="">全部</option></select></div>
         <div class="field"><label>相关度</label>
-          <select id="fRelevance">
-            <option value="medium">medium+（默认）</option>
-            <option value="low">low+</option>
-            <option value="high">仅 high</option>
+          <select id="fRelevance" onchange="onIntelFilterChange()">
+            <option value="medium">中及以上（默认）</option>
+            <option value="low">低及以上</option>
+            <option value="high">仅高</option>
             <option value="">全部</option>
           </select>
         </div>
+        <div class="field"><label>情感</label>
+          <select id="fSentiment" onchange="onIntelFilterChange()">
+            <option value="">全部</option>
+            <option value="negative">负面</option>
+            <option value="neutral">中性</option>
+            <option value="positive">正面</option>
+          </select>
+        </div>
+        <div class="field"><label>情感分数≥</label><input id="fSentimentMin" type="number" step="0.1" min="-1" max="1" placeholder="如 -1" onchange="onIntelFilterChange()" onkeydown="if(event.key==='Enter')onIntelFilterChange()"></div>
+        <div class="field"><label>情感分数≤</label><input id="fSentimentMax" type="number" step="0.1" min="-1" max="1" placeholder="如 -0.3" onchange="onIntelFilterChange()" onkeydown="if(event.key==='Enter')onIntelFilterChange()"></div>
         <div class="btn-group" style="margin:0">
-          <button class="btn btn-primary btn-sm" onclick="loadRecords()">刷新</button>
+          <button class="btn btn-primary btn-sm" onclick="onIntelFilterChange()">刷新</button>
           <button class="btn btn-gray btn-sm" onclick="exportIntel('json')" title="导出当前筛选结果全量">导出 JSON</button>
           <button class="btn btn-gray btn-sm" onclick="exportIntel('xlsx')" title="导出当前筛选结果全量">导出 Excel</button>
         </div>
@@ -101,8 +111,8 @@
         <div class="card">
           <h2>源数据列表 <span id="rawRecordCount" class="meta"></span></h2>
           <div class="table-wrap scroll">
-            <table><thead><tr><th>ID</th><th>任务</th><th>合作方</th><th>来源</th><th>关键词</th><th>摘要</th><th>采集</th><th>更新</th><th>分析</th></tr></thead>
-            <tbody id="rawTableBody"><tr><td colspan="9" class="empty">加载中…</td></tr></tbody></table>
+            <table><thead><tr><th>ID</th><th>任务</th><th>合作方</th><th>来源</th><th>关键词</th><th>摘要</th><th data-field-key="published_at">发布时间</th><th>采集</th><th>更新</th><th>分析</th></tr></thead>
+            <tbody id="rawTableBody"><tr><td colspan="10" class="empty">加载中…</td></tr></tbody></table>
           </div>
         </div>
       </div>
@@ -450,6 +460,8 @@
   <div class="field"><label>别名（逗号分隔）</label><input id="pAliases" placeholder="品牌A, 子公司B"></div>
   <div class="field"><label>排除词</label><input id="pExclude" placeholder="误匹配词"></div>
   <div class="field"><label>额外监测词</label><input id="pMonitorKw" placeholder="可选"></div>
+  <div class="field"><label>行业 cohort</label><input id="pCohort" placeholder="如：新能源整车"></div>
+  <div class="field"><label>优先级</label><select id="pPriorityTier"><option value="P0">P0 重点</option><option value="P1" selected>P1 常规</option><option value="P2">P2 低频</option></select></div>
   <div class="field"><label>备注</label><textarea id="pNotes" rows="2"></textarea></div>
   <div class="field-row"><input type="checkbox" id="pEnabled" checked><label for="pEnabled" class="toggle-label">启用</label></div>
 </div>
@@ -459,7 +471,8 @@
   <div class="field"><label>合作方 *</label><div id="tPartnerChecks" class="partner-checks"><span class="muted">请先添加合作方</span></div></div>
   <div class="field"><label>数据来源</label><div id="tSourceChecks" class="source-checks"></div></div>
   <div class="field"><label>采集页数</label><input id="tPages" type="number" value="2" min="1"></div>
-  <div class="field-row"><input type="checkbox" id="tFetchDetail" checked><label for="tFetchDetail" class="toggle-label">抓取详情</label></div>
+  <div class="field"><label>爬取模式</label><select id="tCrawlMode"><option value="list_first" selected>列表优先（Stage2 共享池）</option><option value="legacy">Legacy（合作方×源逐条详情）</option></select><p class="muted" style="margin-top:6px;font-size:12px">列表优先：常规只抓列表摘要，高相关高风险增量信号在勘察阶段补详情。</p></div>
+  <div class="field-row"><input type="checkbox" id="tFetchDetail"><label for="tFetchDetail" class="toggle-label">Legacy 模式抓取详情</label></div>
   <div class="field schedule-block">
     <div class="field-row"><input type="checkbox" id="tScheduleEnabled"><label for="tScheduleEnabled" class="toggle-label">启用定时执行（增量）</label></div>
     <div id="scheduleFields" style="display:none;margin-top:10px">

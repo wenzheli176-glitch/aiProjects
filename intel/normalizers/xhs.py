@@ -22,14 +22,15 @@ class XhsNormalizeAdapter:
             'collects': structured.get('collects'),
             'comments': structured.get('comments'),
             'tags': structured.get('tags'),
+            'date_parse_quality': structured.get('date_parse_quality') or '',
         })
         return {
             'source': 'xhs',
             'external_id': structured.get('note_id') or '',
             'url': link,
-            'published_at': structured.get('time') or raw.get('time') or '',
+            'published_at': structured.get('time') or '',
             'title': title,
-            'body': body or title,
+            'body': body,
             'author': structured.get('author') or raw.get('author') or '',
             'extra': extra,
             'raw_payload': raw,

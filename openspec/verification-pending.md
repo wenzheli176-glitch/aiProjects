@@ -89,3 +89,40 @@ python scripts/sync_verification_tasks.py scan
 - [x] 7.6 数据源 heimao/xhs Tab 切换保存生效
 - [x] 7.7 窄屏（≤900px）主要 Tab 可用；全站浅色无深色残留块
 - [x] 7.8 `/dashboard` → home；login_wait 横幅各 Tab 仍可见
+
+## crawl-scale-stage2
+
+<!-- archive: openspec/changes/archive/2026-06-11-crawl-scale-stage2/tasks.md -->
+
+- [x] 6.4 手动验证：list_first 任务 routine 阶段无逐条详情；investigation 触发 heimao/xhs 登录门禁
+- [x] 6.5 手动验证：`PATCH /api/partners/{id}/priority` 指定 P0 后下一 run 优先执行 cohort batch
+
+## crawl-early-stop-per-source
+
+<!-- archive: openspec/changes/crawl-early-stop-per-source/tasks.md -->
+
+- [x] 5.1 黑猫调试爬取：关键词结果不足 M 页时，日志出现 `early_stop · empty_page` 且实际页数 < M
+- [x] 5.2 黑猫：`early_stop.enabled=false` 时跑满 M 页（不因见底提前结束）
+- [x] 5.3 小红书调试爬取：滚至 `- THE END -` 后出现 `early_stop · end_marker`
+- [x] 5.4 小红书：短关键词在 end 未出现前，饱和兜底可停止（可选 `saturation_rounds=1`）
+- [x] 5.5 验证完成后执行 `python scripts/sync_verification_tasks.py push`
+
+## xhs-investigation-modal-detail
+
+<!-- change: openspec/changes/xhs-investigation-modal-detail/tasks.md -->
+
+- [x] 4.1 list_first 监测：xhs investigation 日志无 goto explore，出现弹窗提取成功
+- [x] 4.2 故意使用列表中不存在的 URL：单条 `dom_not_found` skip，任务继续
+- [x] 4.3 同 keyword 连续 3+ miss：触发重搜日志，重搜后部分 URL 可定位
+- [x] 4.4 未登录 xhs：investigation 触发登录等待后续跑弹窗详情
+- [x] 4.5 验证完成后 `python scripts/sync_verification_tasks.py push`
+
+## intel-recency-confidence-filters
+
+<!-- change: openspec/changes/intel-recency-confidence-filters/tasks.md -->
+
+- [x] 9.1 黑猫/xhs raw：源数据页可见规范 `YYYY-MM-DD` 或空（非乱码相对时间直出）
+- [x] 9.2 跑监测或 reanalyze：intel 含 `confidence`；`published_at` 传入后旧文 high 可被降为 medium/low
+- [x] 9.3 无 `published_at` 条目：仍可 high，不因缺日期 alone 降档
+- [x] 9.4 情报列表：sentiment_label=negative 与 score 区间组合筛选正确；导出与列表一致
+- [x] 9.5 验证完成后 `python scripts/sync_verification_tasks.py push`

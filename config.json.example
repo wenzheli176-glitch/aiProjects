@@ -3,6 +3,9 @@
     "host": "0.0.0.0",
     "port": 5000
   },
+  "app": {
+    "timezone": "Asia/Shanghai"
+  },
   "chrome": {
     "exe_path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
     "cdp_port": 9222,
@@ -127,6 +130,13 @@
     "typing_delay_max": 150,
     "title_max_len": 100,
     "list_title_preview_len": 40,
+    "early_stop": {
+      "enabled": true,
+      "min_pages": 1,
+      "empty_pages_threshold": 1,
+      "protect_first_page": true,
+      "empty_page_retry": 1
+    },
     "normalize": {
       "include_reply_in_body": true,
       "include_merchant_in_body": true,
@@ -195,6 +205,14 @@
     "between_pages_max": 10,
     "title_max_len": 100,
     "title_preview_len": 40,
+    "early_stop": {
+      "enabled": true,
+      "min_pages": 1,
+      "protect_first_page": true,
+      "end_texts": ["- THE END -", "THE END"],
+      "end_selectors": [],
+      "saturation_rounds": 2
+    },
     "normalize": {
       "body_max_chars": 0,
       "fallback_title_from_body": true,
@@ -203,6 +221,13 @@
     },
     "detail_wait_min": 4,
     "detail_wait_max": 7,
+    "investigation_detail": {
+      "dom_miss_skip": true,
+      "dom_miss_research_threshold": 3,
+      "research_max_scroll_rounds": 2,
+      "between_detail_min": 4,
+      "between_detail_max": 7
+    },
     "detail_open_wait_ms": 3500,
     "detail_modal_root_selectors": [
       "#noteContainer",
@@ -302,8 +327,16 @@
     ],
     "default_max_pages": 2,
     "task_timeout_sec": 7200,
+    "analysis_timeout_sec": 7200,
     "scheduler_enabled": true,
-    "scheduler_timezone": "Asia/Shanghai"
+    "scheduler_timezone": "Asia/Shanghai",
+    "crawl_mode": "list_first",
+    "industry_batch_max_keywords": 5,
+    "priority_quota": {
+      "P0": 0.5,
+      "P1": 0.3,
+      "P2": 0.2
+    }
   },
   "analysis": {
     "provider": "minimax",
@@ -322,9 +355,25 @@
     "timeout_sec": 180,
     "mock_without_key": false,
     "mock_default_relevance": "medium",
+    "recency": {
+      "enabled": true,
+      "downgrade_days_high_to_medium": 30,
+      "downgrade_days_medium_to_low": 90,
+      "confidence_downgrade_threshold": 0.4
+    },
     "system_prompt": "",
     "extra_body": {
       "reasoning_split": true
+    },
+    "list_triage": {
+      "enabled": true,
+      "model": "MiniMax-M3",
+      "batch_size": 20,
+      "max_body_chars": 400,
+      "investigation_threshold": {
+        "min_relevance": "medium",
+        "min_risk_hint": "elevated"
+      }
     }
   },
   "intel": {

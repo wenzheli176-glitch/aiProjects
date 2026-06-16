@@ -60,7 +60,8 @@ async function showRawDetail(rawId) {
       + '<div class="detail-meta">'
       + metaRow('任务', '#' + r.task_id) + metaRow('合作方', '#' + (r.partner_id || ''))
       + metaRow('来源', r.source) + metaRow('关键词', r.keyword)
-      + metaRow('采集时间', fmtTime(r.created_at)) + metaRow('更新时间', fmtTime(r.updated_at))
+      + metaRow('发布时间', fmtTime(r.published_at) || '—') + metaRow('采集时间', fmtTime(r.created_at))
+      + metaRow('更新时间', fmtTime(r.updated_at))
       + metaRow('dedup_key', r.dedup_key || '—') + metaRow('content_hash', r.content_hash || '—')
       + '</div><div class="detail-actions">' + intelLink + '</div>'
       + '<h3 class="detail-subtitle">Payload</h3>'
@@ -95,7 +96,7 @@ async function loadRawRecords() {
     const rows = d.records || [];
     if (countEl) countEl.textContent = '(共 ' + (d.total || rows.length) + ' 条)';
     if (!rows.length) {
-      body.innerHTML = '<tr><td colspan="9" class="empty">暂无源数据</td></tr>';
+      body.innerHTML = '<tr><td colspan="10" class="empty">暂无源数据</td></tr>';
       return;
     }
     body.innerHTML = rows.map(function(r) {
@@ -103,11 +104,12 @@ async function loadRawRecords() {
         + '<td>' + r.id + '</td><td>#' + r.task_id + '</td><td>#' + (r.partner_id || '') + '</td>'
         + '<td>' + sourceTag(r.source) + '</td><td>' + esc(r.keyword || '') + '</td>'
         + '<td class="truncate" title="' + esc(r.title_summary || '') + '">' + esc(r.title_summary || '—') + '</td>'
+        + '<td>' + (fmtTime(r.published_at) || '—') + '</td>'
         + '<td>' + fmtTime(r.created_at) + '</td><td>' + fmtTime(r.updated_at) + '</td>'
         + '<td>' + (r.analyze_status === 'analyzed' ? '已分析' : '待分析') + '</td></tr>';
     }).join('');
   } catch (e) {
-    body.innerHTML = '<tr><td colspan="9" class="msg-err">' + esc(e.message) + '</td></tr>';
+    body.innerHTML = '<tr><td colspan="10" class="msg-err">' + esc(e.message) + '</td></tr>';
   }
 }
 

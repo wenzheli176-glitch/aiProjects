@@ -6,6 +6,7 @@ from collections import Counter
 from datetime import datetime
 
 from auth_utils import extract_complaint_id
+from intel.date_parse import parse_published_date
 
 HEIMAO_COLUMNS = [
     ('序号', '_index'),
@@ -34,10 +35,8 @@ def structure_heimao_record(raw, index=None):
     if not title and content:
         title = content[:100]
     time_raw = (raw.get('time') or '').strip()
-    publish_date = ''
-    m = re.search(r'(\d{4}-\d{2}-\d{2})', time_raw)
-    if m:
-        publish_date = m.group(1)
+    anchor = raw.get('_anchor_at') or raw.get('created_at') or ''
+    publish_date, date_quality = parse_published_date(time_raw, anchor)
     structured = {
         '_index': index,
         'complaint_id': extract_complaint_id(link),
@@ -47,8 +46,9 @@ def structure_heimao_record(raw, index=None):
         'amount': (raw.get('amount') or '').strip(),
         'demand': (raw.get('demand') or '').strip(),
         'status': (raw.get('status') or '').strip(),
-        'time': publish_date or time_raw,
+        'time': publish_date,
         'time_raw': time_raw,
+        'date_parse_quality': date_quality,
         'author': (raw.get('author') or '').strip(),
         'content': content,
         'reply': (raw.get('reply') or '').strip(),
@@ -96,13 +96,18 @@ def structure_xhs_record(raw, index=None):
     title = (raw.get('title') or '').strip()
     if not title and content:
         title = content[:100]
+    anchor = raw.get('_anchor_at') or raw.get('created_at') or ''
+    time_raw = (raw.get('time') or '').strip()
+    publish_date, date_quality = parse_published_date(time_raw, anchor)
     structured = {
         '_index': index,
         'note_id': _extract_xhs_note_id(link),
         'title': title,
         'content': content,
         'author': (raw.get('author') or '').strip(),
-        'time': (raw.get('time') or '').strip(),
+        'time': publish_date,
+        'time_raw': time_raw,
+        'date_parse_quality': date_quality,
         'likes': (raw.get('likes') or '').strip(),
         'collects': (raw.get('collects') or '').strip(),
         'comments': (raw.get('comments') or '').strip(),

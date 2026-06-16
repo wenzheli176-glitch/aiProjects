@@ -186,6 +186,96 @@
       "type": "number",
       "help": "秒"
     },
+    "early_stop": {
+      "label": "分页见底早停",
+      "group": "crawl",
+      "type": "object",
+      "help": "含 enabled、分源策略字段"
+    },
+    "early_stop.enabled": {
+      "label": "启用早停",
+      "group": "crawl",
+      "type": "checkbox",
+      "help": ""
+    },
+    "early_stop.min_pages": {
+      "label": "最少采集页/轮",
+      "group": "crawl",
+      "type": "number",
+      "help": ""
+    },
+    "early_stop.empty_pages_threshold": {
+      "label": "连续空页阈值",
+      "group": "crawl",
+      "type": "number",
+      "help": "黑猫"
+    },
+    "early_stop.protect_first_page": {
+      "label": "保护第 1 页",
+      "group": "crawl",
+      "type": "checkbox",
+      "help": "防加载失败误停"
+    },
+    "early_stop.empty_page_retry": {
+      "label": "第 1 页空结果重试",
+      "group": "crawl",
+      "type": "number",
+      "help": "黑猫"
+    },
+    "early_stop.end_texts": {
+      "label": "见底文案列表",
+      "group": "crawl",
+      "type": "text",
+      "help": "小红书，如 - THE END -"
+    },
+    "early_stop.end_selectors": {
+      "label": "见底选择器",
+      "group": "crawl",
+      "type": "text",
+      "help": "小红书可选"
+    },
+    "early_stop.saturation_rounds": {
+      "label": "滚动饱和轮数",
+      "group": "crawl",
+      "type": "number",
+      "help": "小红书"
+    },
+    "investigation_detail": {
+      "label": "勘察弹窗详情",
+      "group": "crawl",
+      "type": "object",
+      "help": "list_first investigation 弹窗路径"
+    },
+    "investigation_detail.dom_miss_skip": {
+      "label": "DOM 未找到跳过",
+      "group": "crawl",
+      "type": "checkbox",
+      "help": ""
+    },
+    "investigation_detail.dom_miss_research_threshold": {
+      "label": "重搜阈值",
+      "group": "crawl",
+      "type": "number",
+      "help": "同 keyword 累计 miss"
+    },
+    "investigation_detail.research_max_scroll_rounds": {
+      "label": "重搜滚动轮数",
+      "group": "crawl",
+      "type": "number",
+      "help": ""
+    },
+    "investigation_detail.between_detail_min": {
+      "label": "详情间隔最小秒",
+      "group": "crawl",
+      "type": "number",
+      "help": ""
+    },
+    "investigation_detail.between_detail_max": {
+      "label": "详情间隔最大秒",
+      "group": "crawl",
+      "type": "number",
+      "help": ""
+    },
     "include_reply_in_body": {
       "label": "正文含回复",
       "group": "normalize",
@@ -414,10 +504,46 @@
       "type": "text",
       "help": ""
     },
+    "confidence": {
+      "label": "置信度",
+      "group": "intel",
+      "type": "text",
+      "help": ""
+    },
     "sentiment_label": {
       "label": "情感",
       "group": "intel",
       "type": "text",
+      "help": ""
+    },
+    "sentiment_score": {
+      "label": "情感分数",
+      "group": "intel",
+      "type": "text",
+      "help": ""
+    },
+    "recency.enabled": {
+      "label": "启用时效降档",
+      "group": "analysis",
+      "type": "checkbox",
+      "help": ""
+    },
+    "recency.downgrade_days_high_to_medium": {
+      "label": "high→medium 天数",
+      "group": "analysis",
+      "type": "number",
+      "help": ""
+    },
+    "recency.downgrade_days_medium_to_low": {
+      "label": "medium→low 天数",
+      "group": "analysis",
+      "type": "number",
+      "help": ""
+    },
+    "recency.confidence_downgrade_threshold": {
+      "label": "低置信降档阈值",
+      "group": "analysis",
+      "type": "number",
       "help": ""
     },
     "risk_types": {
@@ -443,6 +569,12 @@
       "group": "monitor",
       "type": "number",
       "help": "秒"
+    },
+    "analysis_timeout_sec": {
+      "label": "分析预留超时",
+      "group": "monitor",
+      "type": "number",
+      "help": "爬取完成后 AI 分析预算（秒）"
     },
     "default_sources": {
       "label": "默认来源",
@@ -529,10 +661,10 @@
       "help": "毫秒，LLM 批次 wall time"
     },
     "error_message": {
-      "label": "错误信息",
+      "label": "Error Message",
       "group": "monitor_run",
       "type": "text",
-      "help": "失败或跳过时摘要"
+      "help": "Failure summary and full stack trace when available"
     },
     "raw_new": {
       "label": "新增 Raw",
@@ -569,6 +701,48 @@
       "group": "monitor_run",
       "type": "number",
       "help": "dedup 等原因未写入的条数"
+    },
+    "triage_high": {
+      "label": "初筛-高",
+      "group": "monitor_run",
+      "type": "number",
+      "help": "高优先级初筛计数"
+    },
+    "triage_medium": {
+      "label": "初筛-中",
+      "group": "monitor_run",
+      "type": "number",
+      "help": "中优先级初筛计数"
+    },
+    "triage_noise": {
+      "label": "初筛-噪声",
+      "group": "monitor_run",
+      "type": "number",
+      "help": "噪声初筛计数"
+    },
+    "needs_investigation_count": {
+      "label": "待勘察",
+      "group": "monitor_run",
+      "type": "number",
+      "help": "标记需深度勘察的条数"
+    },
+    "investigation_queued": {
+      "label": "勘察排队",
+      "group": "monitor_run",
+      "type": "number",
+      "help": "已入勘察队列条数"
+    },
+    "investigation_done": {
+      "label": "勘察完成",
+      "group": "monitor_run",
+      "type": "number",
+      "help": "勘察成功条数"
+    },
+    "investigation_failed": {
+      "label": "勘察失败",
+      "group": "monitor_run",
+      "type": "number",
+      "help": "勘察失败条数"
     },
     "crawl_ms": {
       "label": "爬取耗时",

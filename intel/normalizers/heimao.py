@@ -27,9 +27,9 @@ class HeimaoNormalizeAdapter:
             'source': 'heimao',
             'external_id': structured.get('complaint_id') or extract_complaint_id(link),
             'url': link,
-            'published_at': structured.get('time') or raw.get('time') or '',
+            'published_at': structured.get('time') or '',
             'title': title,
-            'body': body or title,
+            'body': body,
             'author': structured.get('author') or '',
             'extra': {
                 'merchant': structured.get('merchant'),
@@ -37,6 +37,7 @@ class HeimaoNormalizeAdapter:
                 'amount': structured.get('amount'),
                 'status': structured.get('status'),
                 'demand': structured.get('demand'),
+                'date_parse_quality': structured.get('date_parse_quality') or '',
             },
             'raw_payload': raw,
         }

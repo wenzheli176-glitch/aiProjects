@@ -8,11 +8,12 @@ import threading
 from datetime import datetime, timedelta, timezone
 
 from config import BASE_DIR, cfg, get_config
+from intel.time_util import app_today_start_iso, app_tz, now_iso
 
 _db_lock = threading.Lock()
 _conn = None
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 INTEL_SCHEMA_VERSION = '1.1'
 
 DEFAULT_SCHEDULE = {
@@ -25,7 +26,8 @@ DEFAULT_SCHEDULE = {
 
 
 def _utc_now():
-    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    """兼容旧名：写入应用时区（北京时间）时间戳。"""
+    return now_iso()
 
 
 def _db_path():
@@ -223,6 +225,19 @@ def _migrate_schema(conn):
         conn.execute(
             "ALTER TABLE intel_records ADD COLUMN sentiment_label TEXT NOT NULL DEFAULT 'neutral'"
         )
+    if 'confidence' not in cols:
+        conn.execute('ALTER TABLE intel_records ADD COLUMN confidence REAL')
+        try:
+            from intel.analyze import DEFAULT_SYSTEM_PROMPT
+            conn.execute(
+                """
+                UPDATE prompt_templates SET body=?, updated_at=?
+                WHERE id='default-high-recall' AND is_builtin=1
+                """,
+                (DEFAULT_SYSTEM_PROMPT, _utc_now()),
+            )
+        except Exception:
+            pass
     job_cols = {r[1] for r in conn.execute('PRAGMA table_info(analysis_jobs)').fetchall()}
     if 'usage_json' not in job_cols:
         conn.execute(
@@ -307,6 +322,54 @@ def _migrate_schema(conn):
         """
     )
     _backfill_raw_hashes(conn)
+    partner_cols = {r[1] for r in conn.execute('PRAGMA table_info(partners)').fetchall()}
+    if 'industry_cohort' not in partner_cols:
+        conn.execute("ALTER TABLE partners ADD COLUMN industry_cohort TEXT NOT NULL DEFAULT ''")
+    if 'priority_tier' not in partner_cols:
+        conn.execute("ALTER TABLE partners ADD COLUMN priority_tier TEXT NOT NULL DEFAULT 'P1'")
+    if 'priority_source' not in partner_cols:
+        conn.execute(
+            "ALTER TABLE partners ADD COLUMN priority_source TEXT NOT NULL DEFAULT 'auto'"
+        )
+    if 'priority_updated_at' not in partner_cols:
+        conn.execute("ALTER TABLE partners ADD COLUMN priority_updated_at TEXT NOT NULL DEFAULT ''")
+    if 'priority_reason' not in partner_cols:
+        conn.execute("ALTER TABLE partners ADD COLUMN priority_reason TEXT NOT NULL DEFAULT ''")
+    raw_cols2 = {r[1] for r in conn.execute('PRAGMA table_info(raw_records)').fetchall()}
+    if 'crawl_phase' not in raw_cols2:
+        conn.execute("ALTER TABLE raw_records ADD COLUMN crawl_phase TEXT NOT NULL DEFAULT 'legacy'")
+    if 'list_triage_json' not in raw_cols2:
+        conn.execute(
+            "ALTER TABLE raw_records ADD COLUMN list_triage_json TEXT NOT NULL DEFAULT '{}'"
+        )
+    task_cols2 = {r[1] for r in conn.execute('PRAGMA table_info(monitor_tasks)').fetchall()}
+    if 'crawl_mode' not in task_cols2:
+        conn.execute(
+            "ALTER TABLE monitor_tasks ADD COLUMN crawl_mode TEXT NOT NULL DEFAULT 'legacy'"
+        )
+    if 'business_spec_json' not in task_cols2:
+        conn.execute(
+            "ALTER TABLE monitor_tasks ADD COLUMN business_spec_json TEXT NOT NULL DEFAULT '{}'"
+        )
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS investigation_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            raw_id INTEGER NOT NULL,
+            url TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT '',
+            priority_score REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'pending',
+            error_message TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (task_id) REFERENCES monitor_tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY (raw_id) REFERENCES raw_records(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_investigation_task ON investigation_queue(task_id, status);
+        """
+    )
     conn.execute(
         "UPDATE schema_meta SET value=? WHERE key='db_schema_version'",
         (str(SCHEMA_VERSION),),
@@ -316,12 +379,18 @@ def _migrate_schema(conn):
 def _row_partner(row):
     if not row:
         return None
+    keys = row.keys()
     return {
         'id': row['id'],
         'name': row['name'],
         'aliases': json.loads(row['aliases_json'] or '[]'),
         'exclude_words': json.loads(row['exclude_words_json'] or '[]'),
         'monitor_keywords': json.loads(row['monitor_keywords_json'] or '[]'),
+        'industry_cohort': row['industry_cohort'] if 'industry_cohort' in keys else '',
+        'priority_tier': row['priority_tier'] if 'priority_tier' in keys else 'P1',
+        'priority_source': row['priority_source'] if 'priority_source' in keys else 'auto',
+        'priority_updated_at': row['priority_updated_at'] if 'priority_updated_at' in keys else '',
+        'priority_reason': row['priority_reason'] if 'priority_reason' in keys else '',
         'enabled': bool(row['enabled']),
         'notes': row['notes'] or '',
         'created_at': row['created_at'],
@@ -350,14 +419,20 @@ def create_partner(data):
     cur = conn.execute(
         """
         INSERT INTO partners(name, aliases_json, exclude_words_json, monitor_keywords_json,
-                             enabled, notes, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                             industry_cohort, priority_tier, priority_source, priority_updated_at,
+                             priority_reason, enabled, notes, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             data['name'],
             json.dumps(data.get('aliases') or [], ensure_ascii=False),
             json.dumps(data.get('exclude_words') or [], ensure_ascii=False),
             json.dumps(data.get('monitor_keywords') or [], ensure_ascii=False),
+            data.get('industry_cohort') or '',
+            data.get('priority_tier') or 'P1',
+            data.get('priority_source') or 'auto',
+            now if data.get('priority_tier') else '',
+            data.get('priority_reason') or '',
             1 if data.get('enabled', True) else 0,
             data.get('notes') or '',
             now,
@@ -377,6 +452,8 @@ def update_partner(partner_id, data):
     conn.execute(
         """
         UPDATE partners SET name=?, aliases_json=?, exclude_words_json=?, monitor_keywords_json=?,
+                            industry_cohort=?, priority_tier=?, priority_source=?,
+                            priority_updated_at=?, priority_reason=?,
                             enabled=?, notes=?, updated_at=?
         WHERE id=?
         """,
@@ -385,6 +462,11 @@ def update_partner(partner_id, data):
             json.dumps(data.get('aliases', existing['aliases']), ensure_ascii=False),
             json.dumps(data.get('exclude_words', existing['exclude_words']), ensure_ascii=False),
             json.dumps(data.get('monitor_keywords', existing['monitor_keywords']), ensure_ascii=False),
+            data.get('industry_cohort', existing.get('industry_cohort') or ''),
+            data.get('priority_tier', existing.get('priority_tier') or 'P1'),
+            data.get('priority_source', existing.get('priority_source') or 'auto'),
+            data.get('priority_updated_at', existing.get('priority_updated_at') or ''),
+            data.get('priority_reason', existing.get('priority_reason') or ''),
             1 if data.get('enabled', existing['enabled']) else 0,
             data.get('notes', existing['notes']),
             now,
@@ -446,6 +528,12 @@ def _row_task(row, partner_ids=None, sources=None):
     schedule = _parse_schedule(
         row['schedule_json'] if 'schedule_json' in keys else '{}'
     )
+    business_spec = {}
+    if 'business_spec_json' in keys:
+        try:
+            business_spec = json.loads(row['business_spec_json'] or '{}')
+        except Exception:
+            business_spec = {}
     return {
         'id': row['id'],
         'name': row['name'] or '',
@@ -454,6 +542,8 @@ def _row_task(row, partner_ids=None, sources=None):
         'partner_ids': partner_ids if partner_ids is not None else [],
         'max_pages': row['max_pages'],
         'fetch_detail': bool(row['fetch_detail']),
+        'crawl_mode': row['crawl_mode'] if 'crawl_mode' in keys else 'legacy',
+        'business_spec': business_spec if isinstance(business_spec, dict) else {},
         'progress': progress,
         'error_message': row['error_message'] or '',
         'schedule': schedule,
@@ -496,17 +586,22 @@ def create_monitor_task(data):
     now = _utc_now()
     conn = get_connection()
     sources = data.get('sources') or cfg('monitor', 'default_sources', default=['heimao', 'xhs'])
+    crawl_mode = data.get('crawl_mode') or cfg('monitor', 'crawl_mode', default='list_first')
+    business_spec = data.get('business_spec') if isinstance(data.get('business_spec'), dict) else {}
     cur = conn.execute(
         """
         INSERT INTO monitor_tasks(name, status, sources_json, max_pages, fetch_detail,
+                                  crawl_mode, business_spec_json,
                                   progress_json, created_at, updated_at)
-        VALUES (?, 'queued', ?, ?, ?, '{}', ?, ?)
+        VALUES (?, 'queued', ?, ?, ?, ?, ?, '{}', ?, ?)
         """,
         (
             data.get('name') or ('监测任务 %s' % now[:16]),
             json.dumps(sources, ensure_ascii=False),
             int(data.get('max_pages') or cfg('monitor', 'default_max_pages', default=2)),
-            1 if data.get('fetch_detail', True) else 0,
+            1 if data.get('fetch_detail', False) else 0,
+            crawl_mode,
+            json.dumps(business_spec, ensure_ascii=False),
             now,
             now,
         ),
@@ -549,6 +644,10 @@ def _row_task_run(row):
         'finished_at': row['finished_at'] if 'finished_at' in keys else None,
         'crawl_duration_ms': row['crawl_duration_ms'],
         'analyze_duration_ms': row['analyze_duration_ms'],
+        'triage_duration_ms': _json_col('stats_json').get('triage_duration_ms', 0),
+        'investigation_crawl_duration_ms': _json_col('stats_json').get(
+            'investigation_crawl_duration_ms', 0,
+        ),
         'timing_by_source': _json_col('timing_by_source_json'),
         'token_usage': _json_col('token_usage_json'),
         'stats': _json_col('stats_json'),
@@ -658,9 +757,14 @@ def update_monitor_task(task_id, data):
     conn = get_connection()
     now = _utc_now()
     sources = data.get('sources', task['sources'])
+    crawl_mode = data.get('crawl_mode', task.get('crawl_mode') or 'legacy')
+    business_spec = task.get('business_spec') or {}
+    if 'business_spec' in data and isinstance(data.get('business_spec'), dict):
+        business_spec = data['business_spec']
     conn.execute(
         """
         UPDATE monitor_tasks SET name=?, sources_json=?, max_pages=?, fetch_detail=?,
+                                 crawl_mode=?, business_spec_json=?,
                                  status='queued', error_message='', updated_at=?,
                                  started_at=NULL, finished_at=NULL, progress_json='{}'
         WHERE id=?
@@ -670,6 +774,8 @@ def update_monitor_task(task_id, data):
             json.dumps(sources, ensure_ascii=False),
             int(data.get('max_pages', task['max_pages'])),
             1 if data.get('fetch_detail', task['fetch_detail']) else 0,
+            crawl_mode,
+            json.dumps(business_spec, ensure_ascii=False),
             now,
             task_id,
         ),
@@ -819,7 +925,9 @@ def _intel_dedup_exists(task_id, dedup_key):
     return row is not None
 
 
-def insert_raw_records(task_id, partner_id, source, keyword, records, run_metrics=None):
+def insert_raw_records(
+    task_id, partner_id, source, keyword, records, run_metrics=None, crawl_phase='legacy',
+):
     if not records:
         return {'ids': [], 'inserted': 0, 'updated': 0, 'unchanged': 0, 'skipped': 0}
     conn = get_connection()
@@ -843,10 +951,11 @@ def insert_raw_records(task_id, partner_id, source, keyword, records, run_metric
             conn.execute(
                 """
                 UPDATE raw_records
-                SET payload_json=?, content_hash=?, updated_at=?, partner_id=?, keyword=?
+                SET payload_json=?, content_hash=?, updated_at=?, partner_id=?, keyword=?,
+                    crawl_phase=?
                 WHERE id=?
                 """,
-                (payload_str, ch, now, partner_id, keyword, existing['id']),
+                (payload_str, ch, now, partner_id, keyword, crawl_phase, existing['id']),
             )
             index[key]['hash'] = ch
             ids.append(existing['id'])
@@ -858,10 +967,10 @@ def insert_raw_records(task_id, partner_id, source, keyword, records, run_metric
             """
             INSERT INTO raw_records(
                 task_id, partner_id, source, keyword, payload_json,
-                dedup_key, content_hash, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                dedup_key, content_hash, crawl_phase, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (task_id, partner_id, source, keyword, payload_str, key, ch, now, now),
+            (task_id, partner_id, source, keyword, payload_str, key, ch, crawl_phase, now, now),
         )
         rid = cur.lastrowid
         ids.append(rid)
@@ -881,14 +990,7 @@ def insert_raw_records(task_id, partner_id, source, keyword, records, run_metric
 
 
 def _shanghai_today_start_utc():
-    try:
-        from zoneinfo import ZoneInfo
-        tz = ZoneInfo('Asia/Shanghai')
-    except Exception:
-        tz = timezone.utc
-    now_local = datetime.now(tz)
-    start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-    return start.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    return app_today_start_iso()
 
 
 def _raw_title_summary(payload):
@@ -901,9 +1003,33 @@ def _raw_title_summary(payload):
     return body[:80] if body else ''
 
 
+def _raw_published_at(source, payload, anchor_at=''):
+    """从 raw payload 解析规范发布时间（YYYY-MM-DD 或空）。"""
+    if not isinstance(payload, dict):
+        return ''
+    raw = dict(payload)
+    anchor = raw.get('_anchor_at') or anchor_at or ''
+    if anchor and not raw.get('_anchor_at'):
+        raw['_anchor_at'] = anchor
+    src = (source or '').lower()
+    try:
+        if src == 'xhs':
+            from reports import structure_xhs_record
+            return structure_xhs_record(raw).get('time') or ''
+        if src == 'heimao':
+            from reports import structure_heimao_record
+            return structure_heimao_record(raw).get('time') or ''
+    except Exception:
+        pass
+    from intel.date_parse import parse_published_date
+    pub, _ = parse_published_date((payload.get('time') or '').strip(), anchor)
+    return pub or ''
+
+
 def _row_raw_list(row):
     payload = json.loads(row['payload_json'] or '{}')
     intel_id = row['intel_id'] if row['intel_id'] else None
+    anchor_at = (row['updated_at'] if 'updated_at' in row.keys() else None) or row['created_at']
     return {
         'id': row['id'],
         'task_id': row['task_id'],
@@ -911,8 +1037,9 @@ def _row_raw_list(row):
         'source': row['source'],
         'keyword': row['keyword'],
         'title_summary': _raw_title_summary(payload),
+        'published_at': _raw_published_at(row['source'], payload, anchor_at),
         'created_at': row['created_at'],
-        'updated_at': (row['updated_at'] if 'updated_at' in row.keys() else None) or row['created_at'],
+        'updated_at': anchor_at,
         'intel_id': intel_id,
         'analyze_status': 'analyzed' if intel_id else 'pending',
     }
@@ -923,6 +1050,7 @@ def _row_raw_detail(row):
         return None
     payload = json.loads(row['payload_json'] or '{}')
     intel_id = row['intel_id'] if row['intel_id'] else None
+    anchor_at = (row['updated_at'] if 'updated_at' in row.keys() else None) or row['created_at']
     return {
         'id': row['id'],
         'task_id': row['task_id'],
@@ -930,11 +1058,12 @@ def _row_raw_detail(row):
         'source': row['source'],
         'keyword': row['keyword'],
         'title_summary': _raw_title_summary(payload),
+        'published_at': _raw_published_at(row['source'], payload, anchor_at),
         'payload': payload,
         'dedup_key': row['dedup_key'] if 'dedup_key' in row.keys() else '',
         'content_hash': row['content_hash'] if 'content_hash' in row.keys() else '',
         'created_at': row['created_at'],
-        'updated_at': (row['updated_at'] if 'updated_at' in row.keys() else None) or row['created_at'],
+        'updated_at': anchor_at,
         'intel_id': intel_id,
         'analyze_status': 'analyzed' if intel_id else 'pending',
     }
@@ -1009,8 +1138,19 @@ def list_raw_records(task_id, source=None):
         params.append(source)
     sql += ' ORDER BY id ASC'
     rows = conn.execute(sql, params).fetchall()
+    return _rows_to_raw_list(rows)
+
+
+def _rows_to_raw_list(rows):
     out = []
     for r in rows:
+        keys = r.keys()
+        triage = {}
+        if 'list_triage_json' in keys:
+            try:
+                triage = json.loads(r['list_triage_json'] or '{}')
+            except Exception:
+                triage = {}
         out.append({
             'id': r['id'],
             'task_id': r['task_id'],
@@ -1018,10 +1158,12 @@ def list_raw_records(task_id, source=None):
             'source': r['source'],
             'keyword': r['keyword'],
             'payload': json.loads(r['payload_json'] or '{}'),
-            'dedup_key': r['dedup_key'] if 'dedup_key' in r.keys() else '',
-            'content_hash': r['content_hash'] if 'content_hash' in r.keys() else '',
+            'dedup_key': r['dedup_key'] if 'dedup_key' in keys else '',
+            'content_hash': r['content_hash'] if 'content_hash' in keys else '',
+            'crawl_phase': r['crawl_phase'] if 'crawl_phase' in keys else 'legacy',
+            'list_triage': triage,
             'created_at': r['created_at'],
-            'updated_at': (r['updated_at'] if 'updated_at' in r.keys() else None) or r['created_at'],
+            'updated_at': (r['updated_at'] if 'updated_at' in keys else None) or r['created_at'],
         })
     return out
 
@@ -1038,8 +1180,8 @@ def insert_intel_record(data):
             task_id, partner_id, partner_name, source, url, title, body, published_at,
             captured_at, relevance, risk_types_json, subject_hits_json, summary,
             export_tier, dedup_key, is_duplicate, prompt_version, model, schema_version,
-            extra_json, raw_record_id, sentiment_score, sentiment_label, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            extra_json, raw_record_id, sentiment_score, sentiment_label, confidence, created_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             data['task_id'],
@@ -1065,6 +1207,7 @@ def insert_intel_record(data):
             data.get('raw_record_id'),
             data.get('sentiment_score'),
             data.get('sentiment_label') or 'neutral',
+            data.get('confidence'),
             now,
         ),
     )
@@ -1101,6 +1244,7 @@ def _row_intel(row):
         'is_duplicate': bool(row['is_duplicate']),
         'sentiment_score': row['sentiment_score'] if 'sentiment_score' in row.keys() else None,
         'sentiment_label': row['sentiment_label'] if 'sentiment_label' in row.keys() else 'neutral',
+        'confidence': row['confidence'] if 'confidence' in row.keys() else None,
         'prompt_version': row['prompt_version'],
         'model': row['model'],
         'schema_version': row['schema_version'],
@@ -1113,6 +1257,24 @@ def _row_intel(row):
 
 _RELEVANCE_ORDER = {'noise': 0, 'low': 1, 'medium': 2, 'high': 3}
 
+_SENTIMENT_LABEL_MAP = {
+    'negative': 'negative',
+    'neutral': 'neutral',
+    'positive': 'positive',
+    '负面': 'negative',
+    '中性': 'neutral',
+    '正面': 'positive',
+}
+
+
+def _normalize_sentiment_label_filter(label):
+    if not label:
+        return None
+    text = str(label).strip()
+    if not text:
+        return None
+    return _SENTIMENT_LABEL_MAP.get(text) or _SENTIMENT_LABEL_MAP.get(text.lower()) or text
+
 
 def list_intel_records(
     task_id=None,
@@ -1122,6 +1284,9 @@ def list_intel_records(
     since=None,
     risk_type=None,
     export_tier=None,
+    sentiment_label=None,
+    sentiment_score_min=None,
+    sentiment_score_max=None,
     include_duplicates=False,
     page=1,
     page_size=50,
@@ -1155,6 +1320,16 @@ def list_intel_records(
     if risk_type:
         where.append("risk_types_json LIKE ?")
         params.append('%%"%s"%%' % risk_type.replace('"', ''))
+    sentiment_label = _normalize_sentiment_label_filter(sentiment_label)
+    if sentiment_label:
+        where.append('sentiment_label = ?')
+        params.append(sentiment_label)
+    if sentiment_score_min is not None:
+        where.append('sentiment_score >= ?')
+        params.append(float(sentiment_score_min))
+    if sentiment_score_max is not None:
+        where.append('sentiment_score <= ?')
+        params.append(float(sentiment_score_max))
 
     sql_base = ' FROM intel_records WHERE ' + ' AND '.join(where)
     total = conn.execute('SELECT COUNT(*)' + sql_base, params).fetchone()[0]
@@ -1327,6 +1502,30 @@ def update_analysis_job(job_id, **fields):
     conn.commit()
 
 
+def fail_running_analysis_jobs(task_id, run_id=None, error_message=''):
+    """监测失败时将未完成的 analysis job 标记为 failed。"""
+    conn = get_connection()
+    now = _utc_now()
+    msg = (error_message or '')[:8192]
+    if run_id:
+        conn.execute(
+            """
+            UPDATE analysis_jobs SET status='failed', error_message=?, finished_at=?, updated_at=?
+            WHERE task_id=? AND run_id=? AND status='running'
+            """,
+            (msg, now, now, task_id, run_id),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE analysis_jobs SET status='failed', error_message=?, finished_at=?, updated_at=?
+            WHERE task_id=? AND status='running'
+            """,
+            (msg, now, now, task_id),
+        )
+    conn.commit()
+
+
 def count_intel_by_partner(task_id):
     conn = get_connection()
     rows = conn.execute(
@@ -1382,7 +1581,7 @@ def get_dashboard_summary():
         WHERE status IN ('crawling', 'analyzing')
         """,
     ).fetchone()[0]
-    week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    week_ago = (datetime.now(app_tz()) - timedelta(days=7)).strftime('%Y-%m-%dT%H:%M:%S')
     tasks_failed_recent = conn.execute(
         """
         SELECT COUNT(*) FROM monitor_tasks
@@ -1529,3 +1728,140 @@ def delete_prompt_template(prompt_id):
     conn.execute('DELETE FROM prompt_templates WHERE id = ?', (prompt_id,))
     conn.commit()
     return True
+
+
+def update_raw_triage(raw_id, triage_data):
+    conn = get_connection()
+    now = _utc_now()
+    conn.execute(
+        'UPDATE raw_records SET list_triage_json=?, updated_at=? WHERE id=?',
+        (json.dumps(triage_data or {}, ensure_ascii=False), now, raw_id),
+    )
+    conn.commit()
+
+
+def merge_raw_payload(raw_id, payload_patch, crawl_phase='detail'):
+    conn = get_connection()
+    row = conn.execute('SELECT * FROM raw_records WHERE id=?', (raw_id,)).fetchone()
+    if not row:
+        return False
+    try:
+        payload = json.loads(row['payload_json'] or '{}')
+    except Exception:
+        payload = {}
+    if isinstance(payload_patch, dict):
+        payload.update(payload_patch)
+    ch = raw_content_hash(payload)
+    now = _utc_now()
+    conn.execute(
+        """
+        UPDATE raw_records SET payload_json=?, content_hash=?, updated_at=?, crawl_phase=?
+        WHERE id=?
+        """,
+        (json.dumps(payload, ensure_ascii=False), ch, now, crawl_phase, raw_id),
+    )
+    conn.commit()
+    return True
+
+
+def list_raw_for_triage(task_id):
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT * FROM raw_records
+        WHERE task_id=? AND crawl_phase IN ('list', 'legacy')
+        ORDER BY id ASC
+        """,
+        (task_id,),
+    ).fetchall()
+    return _rows_to_raw_list(rows)
+
+
+def clear_investigation_queue(task_id):
+    conn = get_connection()
+    conn.execute('DELETE FROM investigation_queue WHERE task_id=?', (task_id,))
+    conn.commit()
+
+
+def enqueue_investigation(task_id, raw_id, url, source, priority_score=0):
+    conn = get_connection()
+    now = _utc_now()
+    existing = conn.execute(
+        """
+        SELECT id FROM investigation_queue
+        WHERE task_id=? AND raw_id=? AND status IN ('pending', 'running')
+        """,
+        (task_id, raw_id),
+    ).fetchone()
+    if existing:
+        return existing['id']
+    cur = conn.execute(
+        """
+        INSERT INTO investigation_queue(
+            task_id, raw_id, url, source, priority_score, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+        """,
+        (task_id, raw_id, url or '', source or '', float(priority_score or 0), now, now),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def list_investigation_queue(task_id, status='pending'):
+    conn = get_connection()
+    sql = 'SELECT * FROM investigation_queue WHERE task_id=?'
+    params = [task_id]
+    if status:
+        sql += ' AND status=?'
+        params.append(status)
+    sql += ' ORDER BY priority_score DESC, id ASC'
+    rows = conn.execute(sql, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_investigation_status(queue_id, status, error_message=''):
+    conn = get_connection()
+    now = _utc_now()
+    conn.execute(
+        """
+        UPDATE investigation_queue SET status=?, error_message=?, updated_at=?
+        WHERE id=?
+        """,
+        (status, (error_message or '')[:200], now, queue_id),
+    )
+    conn.commit()
+
+
+def update_partner_priority(partner_id, tier, source='business', reason=''):
+    tier = (tier or 'P1').upper()
+    if tier not in ('P0', 'P1', 'P2'):
+        tier = 'P1'
+    now = _utc_now()
+    conn = get_connection()
+    conn.execute(
+        """
+        UPDATE partners SET priority_tier=?, priority_source=?, priority_updated_at=?,
+                            priority_reason=?, updated_at=?
+        WHERE id=?
+        """,
+        (tier, source or 'business', now, (reason or '')[:200], now, partner_id),
+    )
+    conn.commit()
+    return get_partner(partner_id)
+
+
+def list_partners_priority():
+    partners = list_partners()
+    out = []
+    for p in partners:
+        out.append({
+            'id': p['id'],
+            'name': p['name'],
+            'priority_tier': p.get('priority_tier') or 'P1',
+            'priority_source': p.get('priority_source') or 'auto',
+            'priority_updated_at': p.get('priority_updated_at') or '',
+            'priority_reason': p.get('priority_reason') or '',
+            'industry_cohort': p.get('industry_cohort') or '',
+        })
+    return out
+

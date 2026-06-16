@@ -2,7 +2,9 @@
 """小红书详情：在搜索页点击笔记打开弹窗后抓取（避免直接 goto explore 触发 App 墙）。"""
 import json
 import random
+import re
 import time
+from urllib.parse import parse_qs, urlparse
 
 from config import get_config
 
@@ -222,6 +224,104 @@ def open_xhs_note_modal(page, item, link_selector, open_wait_ms=3500):
     if app_hit:
         return False, '页面提示: %s' % app_t
     return False, '未检测到详情弹窗'
+
+
+def parse_xhs_note_id(url):
+    """从 explore/discovery URL 或 query 解析 note_id。"""
+    if not url:
+        return ''
+    url = str(url).strip()
+    m = re.search(r'/(?:explore|discovery/item)/([a-fA-F0-9]+)', url)
+    if m:
+        return m.group(1)
+    try:
+        qs = parse_qs(urlparse(url).query)
+        for key in ('note_id', 'noteId', 'id'):
+            vals = qs.get(key) or []
+            if vals and vals[0]:
+                return str(vals[0]).strip()
+    except Exception:
+        pass
+    return ''
+
+
+def xhs_href_contains_note_id(href, note_id, link_host=''):
+    """判断链接 href 是否含给定 note_id（供 DOM 匹配与单元测试）。"""
+    if not href or not note_id:
+        return False
+    href = str(href).strip()
+    if link_host and href and not href.startswith('http'):
+        href = link_host.rstrip('/') + href
+    return note_id in href
+
+
+def _note_item_href_has_id(item, note_id, link_selector, link_host):
+    try:
+        le = item.query_selector(link_selector)
+    except Exception:
+        le = None
+    if not le:
+        try:
+            le = item.query_selector('a[href*="/explore/"], a[href*="/discovery/item/"]')
+        except Exception:
+            le = None
+    if not le:
+        return False
+    try:
+        href = le.get_attribute('href') or ''
+    except Exception:
+        return False
+    return xhs_href_contains_note_id(href, note_id, link_host)
+
+
+def find_note_item_for_url(page, url, note_id=None):
+    """
+    在当前搜索页 DOM 内定位含 url/note_id 的 note-item。
+    返回 (item_element | None, reason)。
+    """
+    x = _xhs_cfg()
+    note_id = note_id or parse_xhs_note_id(url)
+    if not note_id:
+        return None, 'invalid_url'
+    sel = x.get('note_item_selector', '.note-item')
+    link_sel = x.get('link_selector', 'a[href*="explore"]')
+    host = x.get('link_host', 'https://www.xiaohongshu.com')
+    try:
+        items = page.query_selector_all(sel)
+    except Exception:
+        items = []
+    for item in items:
+        if _note_item_href_has_id(item, note_id, link_sel, host):
+            return item, ''
+    return None, 'dom_not_found'
+
+
+def scroll_search_for_note(page, note_id, max_rounds=0):
+    """滚动搜索页并查找含 note_id 的 note-item。"""
+    x = _xhs_cfg()
+    if not note_id:
+        return None, 'invalid_url'
+    if max_rounds <= 0:
+        max_rounds = int(x.get('scroll_times_per_page', 3))
+    sel = x.get('note_item_selector', '.note-item')
+    link_sel = x.get('link_selector', 'a[href*="explore"]')
+    host = x.get('link_host', 'https://www.xiaohongshu.com')
+    scroll_px = int(x.get('scroll_pixels', 1500))
+    scroll_wait = float(x.get('scroll_wait_seconds', 2))
+    for _ in range(max_rounds):
+        try:
+            items = page.query_selector_all(sel)
+        except Exception:
+            items = []
+        for item in items:
+            if _note_item_href_has_id(item, note_id, link_sel, host):
+                return item, ''
+        try:
+            page.evaluate('window.scrollBy(0, %d)' % scroll_px)
+        except Exception:
+            pass
+        time.sleep(scroll_wait)
+    return None, 'dom_not_found'
 
 
 def fetch_xhs_detail_via_modal(page, item, link, log_fn=None):

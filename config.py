@@ -13,6 +13,9 @@ DEFAULT_CONFIG = {
         'host': '0.0.0.0',
         'port': 5000,
     },
+    'app': {
+        'timezone': 'Asia/Shanghai',
+    },
     'chrome': {
         'exe_path': r'C:\Program Files\Google\Chrome\Application\chrome.exe',
         'cdp_port': 9222,
@@ -136,6 +139,13 @@ DEFAULT_CONFIG = {
         },
         'parse_strip_text': '于黑猫投诉平台发起',
         'parse_demand_pattern': r'\[投诉要求\]([^\[]+)',
+        'early_stop': {
+            'enabled': True,
+            'min_pages': 1,
+            'empty_pages_threshold': 1,
+            'protect_first_page': True,
+            'empty_page_retry': 1,
+        },
         'detail': {
             'author_cats': ['机灵喵', '洞察喵', '友爱喵', '正义喵', '勇敢喵', '诚实喵'],
             'time_keyword': '发布于',
@@ -193,6 +203,21 @@ DEFAULT_CONFIG = {
         },
         'detail_wait_min': 4,
         'detail_wait_max': 7,
+        'investigation_detail': {
+            'dom_miss_skip': True,
+            'dom_miss_research_threshold': 3,
+            'research_max_scroll_rounds': 2,
+            'between_detail_min': 4,
+            'between_detail_max': 7,
+        },
+        'early_stop': {
+            'enabled': True,
+            'min_pages': 1,
+            'protect_first_page': True,
+            'end_texts': ['- THE END -', 'THE END'],
+            'end_selectors': [],
+            'saturation_rounds': 2,
+        },
         'detail_open_wait_ms': 3500,
         'detail_modal_root_selectors': [
             '#noteContainer', '.note-detail-mask', '[class*="note-detail"]', '.reds-modal',
@@ -238,8 +263,12 @@ DEFAULT_CONFIG = {
         'default_sources': ['heimao', 'xhs'],
         'default_max_pages': 2,
         'task_timeout_sec': 7200,
+        'analysis_timeout_sec': 7200,
         'scheduler_enabled': True,
         'scheduler_timezone': 'Asia/Shanghai',
+        'crawl_mode': 'list_first',
+        'industry_batch_max_keywords': 5,
+        'priority_quota': {'P0': 0.5, 'P1': 0.3, 'P2': 0.2},
     },
     'analysis': {
         'provider': 'minimax',
@@ -258,9 +287,25 @@ DEFAULT_CONFIG = {
         'timeout_sec': 180,
         'mock_without_key': False,
         'mock_default_relevance': 'medium',
+        'recency': {
+            'enabled': True,
+            'downgrade_days_high_to_medium': 30,
+            'downgrade_days_medium_to_low': 90,
+            'confidence_downgrade_threshold': 0.4,
+        },
         'system_prompt': '',
         'extra_body': {
             'reasoning_split': True,
+        },
+        'list_triage': {
+            'enabled': True,
+            'model': 'MiniMax-M3',
+            'batch_size': 20,
+            'max_body_chars': 400,
+            'investigation_threshold': {
+                'min_relevance': 'medium',
+                'min_risk_hint': 'elevated',
+            },
         },
     },
     'intel': {

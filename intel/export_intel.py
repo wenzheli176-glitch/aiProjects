@@ -8,6 +8,7 @@ import time
 
 from config import cfg
 from intel.db import INTEL_SCHEMA_VERSION, list_intel_records
+from intel.time_util import now_iso
 
 INTEL_EXPORT_COLUMNS = [
     ('id', 'id'),
@@ -22,6 +23,7 @@ INTEL_EXPORT_COLUMNS = [
     ('captured_at', '采集时间'),
     ('analyzed_at', '生成时间'),
     ('relevance', '相关度'),
+    ('confidence', '置信度'),
     ('sentiment_label', '情感倾向'),
     ('sentiment_score', '情感分数'),
     ('risk_types', '风险类型'),
@@ -45,7 +47,7 @@ def build_intel_export_payload(task_id=None, **filters):
     result = list_intel_records(task_id=task_id, page=1, page_size=100000, **filters)
     return {
         'schema_version': cfg('intel', 'schema_version', default=INTEL_SCHEMA_VERSION),
-        'exported_at': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'exported_at': now_iso(),
         'task_id': task_id,
         'count': len(result['records']),
         'records': result['records'],

@@ -21,6 +21,7 @@ SOURCE_PROFILE_KEYS = {
         'min_link_text_len',
         'min_html_len',
         'title_max_len',
+        'early_stop',
     ],
     'xhs': [
         'source_name',
@@ -44,6 +45,8 @@ SOURCE_PROFILE_KEYS = {
         'between_pages_min',
         'between_pages_max',
         'title_max_len',
+        'early_stop',
+        'investigation_detail',
     ],
 }
 

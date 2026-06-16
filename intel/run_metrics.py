@@ -5,7 +5,9 @@
 def _empty_source_bucket():
     return {
         'crawl_ms': 0,
+        'investigation_crawl_ms': 0,
         'analyze_ms': 0,
+        'triage_ms': 0,
         'raw_new': 0,
         'raw_updated': 0,
         'intel_written': 0,
@@ -24,11 +26,20 @@ class RunMetrics:
             'intel_written': 0,
             'intel_replaced': 0,
             'intel_skipped': 0,
+            'triage_high': 0,
+            'triage_medium': 0,
+            'triage_noise': 0,
+            'needs_investigation_count': 0,
+            'investigation_queued': 0,
+            'investigation_done': 0,
+            'investigation_failed': 0,
         }
         self.timing_by_source = {}
         self.token_by_source = {}
         self.crawl_duration_ms = 0
         self.analyze_duration_ms = 0
+        self.triage_duration_ms = 0
+        self.investigation_crawl_duration_ms = 0
 
     def _src(self, source):
         source = source or 'unknown'
@@ -41,6 +52,13 @@ class RunMetrics:
                 'total_tokens': 0,
             }
         return source
+
+    def merge_stats(self, extra):
+        if not isinstance(extra, dict):
+            return
+        for k, v in extra.items():
+            if k in self.stats:
+                self.stats[k] += int(v or 0)
 
     def record_raw_insert(self, source, count=1):
         source = self._src(source)
@@ -59,6 +77,20 @@ class RunMetrics:
         source = self._src(source)
         self.timing_by_source[source]['crawl_ms'] += int(ms)
         self.crawl_duration_ms += int(ms)
+
+    def add_investigation_crawl_ms(self, source, ms):
+        source = self._src(source)
+        self.timing_by_source[source]['investigation_crawl_ms'] += int(ms)
+        self.investigation_crawl_duration_ms += int(ms)
+
+    def add_triage_ms(self, ms):
+        self.triage_duration_ms += int(ms)
+
+    def record_investigation_done(self, count=1):
+        self.stats['investigation_done'] += int(count)
+
+    def record_investigation_failed(self, count=1):
+        self.stats['investigation_failed'] += int(count)
 
     def record_intel_written(self, source, replaced=False):
         source = self._src(source)
@@ -101,9 +133,14 @@ class RunMetrics:
         total_pt = sum(v['prompt_tokens'] for v in self.token_by_source.values())
         total_ct = sum(v['completion_tokens'] for v in self.token_by_source.values())
         total_tt = sum(v['total_tokens'] for v in self.token_by_source.values())
+        stats = dict(self.stats)
+        stats['triage_duration_ms'] = self.triage_duration_ms
+        stats['investigation_crawl_duration_ms'] = self.investigation_crawl_duration_ms
         return {
             'crawl_duration_ms': self.crawl_duration_ms,
             'analyze_duration_ms': self.analyze_duration_ms,
+            'triage_duration_ms': self.triage_duration_ms,
+            'investigation_crawl_duration_ms': self.investigation_crawl_duration_ms,
             'timing_by_source_json': self.timing_by_source,
             'token_usage_json': {
                 'total': {
@@ -113,5 +150,5 @@ class RunMetrics:
                 },
                 'by_source': self.token_by_source,
             },
-            'stats_json': self.stats,
+            'stats_json': stats,
         }

@@ -20,6 +20,23 @@ async function api(url, opts) {
 
 App.api = api;
 
+App.DISPLAY_TZ = 'Asia/Shanghai';
+
+App.fmtTime = function(s) {
+  if (!s) return '-';
+  var t = String(s).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
+  if (/Z$/i.test(t) || /[+-]\d{2}:\d{2}$/.test(t)) {
+    var d = new Date(t);
+    if (isNaN(d.getTime())) return t.replace('T', ' ').slice(0, 16) || '-';
+    return d.toLocaleString('sv-SE', { timeZone: App.DISPLAY_TZ, hour12: false }).slice(0, 16);
+  }
+  if (/^\d{4}-\d{2}-\d{2}[T ]/.test(t)) return t.replace('T', ' ').slice(0, 16);
+  return t.replace('T', ' ').slice(0, 16) || '-';
+};
+
+function fmtTime(s) { return App.fmtTime(s); }
+
 App.readQuery = function() {
   return new URLSearchParams(window.location.search);
 };

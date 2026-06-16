@@ -33,10 +33,12 @@ from intel.db import (
     list_intel_records,
     list_monitor_tasks,
     list_partners,
+    list_partners_priority,
     list_raw_records_paged,
     list_task_runs,
     update_monitor_task,
     update_partner,
+    update_partner_priority,
 )
 from intel.export_intel import write_export_file
 from intel.export_raw import write_raw_export_file
@@ -124,6 +126,54 @@ def api_partners_delete(partner_id):
     return jsonify({'ok': ok})
 
 
+@intel_bp.route('/partners/priority', methods=['GET'])
+def api_partners_priority_list():
+    return jsonify({'ok': True, 'partners': list_partners_priority()})
+
+
+@intel_bp.route('/partners/<int:partner_id>/priority', methods=['PATCH'])
+def api_partners_priority_patch(partner_id):
+    data = request.get_json() or {}
+    tier = data.get('tier') or data.get('priority_tier')
+    if not tier:
+        return jsonify({'ok': False, 'msg': 'tier 必填'})
+    p = update_partner_priority(
+        partner_id,
+        tier,
+        source=data.get('source') or 'business',
+        reason=data.get('reason') or '',
+    )
+    if not p:
+        return jsonify({'ok': False, 'msg': '不存在'}), 404
+    return jsonify({'ok': True, 'partner': p})
+
+
+@intel_bp.route('/partners/bulk-priority', methods=['POST'])
+def api_partners_bulk_priority():
+    data = request.get_json() or {}
+    items = data.get('items') or data.get('partners') or []
+    if not items:
+        return jsonify({'ok': False, 'msg': 'items 必填'})
+    ok_list = []
+    fail_list = []
+    for it in items:
+        pid = it.get('partner_id') or it.get('id')
+        tier = it.get('tier') or it.get('priority_tier')
+        if not pid or not tier:
+            fail_list.append({'item': it, 'msg': 'partner_id/tier 必填'})
+            continue
+        p = update_partner_priority(
+            int(pid), tier,
+            source=it.get('source') or 'business',
+            reason=it.get('reason') or data.get('reason') or '',
+        )
+        if p:
+            ok_list.append(p)
+        else:
+            fail_list.append({'partner_id': pid, 'msg': '不存在'})
+    return jsonify({'ok': True, 'updated': ok_list, 'failed': fail_list})
+
+
 @intel_bp.route('/sources', methods=['GET'])
 def api_sources_list():
     _ensure_registry()
@@ -207,6 +257,12 @@ def api_sources_profile_patch(source_id):
         norm_patch = filter_normalize_patch(source_id, data['normalize']) or norm_patch
     if not crawl_patch and not norm_patch:
         return jsonify({'ok': False, 'msg': '无有效 profile 字段'})
+    node = get_config().get(source_id) or {}
+    if isinstance(crawl_patch.get('early_stop'), dict):
+        prev_es = node.get('early_stop') if isinstance(node.get('early_stop'), dict) else {}
+        merged_es = dict(prev_es)
+        merged_es.update(crawl_patch['early_stop'])
+        crawl_patch['early_stop'] = merged_es
     merge = dict(crawl_patch)
     if norm_patch:
         node = get_config().get(source_id) or {}
@@ -233,6 +289,7 @@ def api_monitor_defaults_get():
             'default_sources': m.get('default_sources') or [],
             'default_max_pages': m.get('default_max_pages', 2),
             'task_timeout_sec': m.get('task_timeout_sec', 7200),
+            'analysis_timeout_sec': m.get('analysis_timeout_sec', 3600),
         },
     })
 
@@ -251,6 +308,8 @@ def api_monitor_defaults_patch():
         patch['default_max_pages'] = int(data['default_max_pages'] or 2)
     if 'task_timeout_sec' in data:
         patch['task_timeout_sec'] = int(data['task_timeout_sec'] or 7200)
+    if 'analysis_timeout_sec' in data:
+        patch['analysis_timeout_sec'] = int(data['analysis_timeout_sec'] or 3600)
     if not patch:
         return jsonify({'ok': False, 'msg': '无有效字段'})
     save_config({'monitor': patch})
@@ -356,6 +415,9 @@ def api_monitor_run():
     analyze_mode = data.get('analyze_mode') or 'incremental'
     if analyze_mode not in ('incremental', 'full_replace'):
         analyze_mode = 'incremental'
+    business_spec = data.get('business_spec')
+    if business_spec is not None and not isinstance(business_spec, dict):
+        business_spec = None
 
     def _run():
         run_monitor_task(
@@ -363,6 +425,7 @@ def api_monitor_run():
             log_fn=log,
             trigger='manual',
             analyze_mode=analyze_mode,
+            business_spec=business_spec,
         )
 
     threading.Thread(target=_run, daemon=True).start()
@@ -409,30 +472,48 @@ def api_dashboard_summary():
     return jsonify({'ok': True, **get_dashboard_summary()})
 
 
+def _parse_float_query(args, key):
+    raw = args.get(key)
+    if raw is None or raw == '':
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _intel_records_filters(args):
+    from intel.db import _normalize_sentiment_label_filter
+    sentiment_label = _normalize_sentiment_label_filter(args.get('sentiment_label'))
+    sentiment_score_min = _parse_float_query(args, 'sentiment_score_min')
+    sentiment_score_max = _parse_float_query(args, 'sentiment_score_max')
+    filters = {
+        'task_id': args.get('task_id', type=int),
+        'partner_id': args.get('partner_id', type=int),
+        'source': args.get('source') or None,
+        'relevance_min': args.get('relevance_min') or None,
+        'since': args.get('since') or None,
+        'risk_type': args.get('risk_type') or None,
+        'export_tier': args.get('export_tier') or None,
+        'sentiment_label': sentiment_label,
+        'sentiment_score_min': sentiment_score_min,
+        'sentiment_score_max': sentiment_score_max,
+    }
+    return {k: v for k, v in filters.items() if v is not None}
+
+
 @intel_bp.route('/intel/records', methods=['GET'])
 def api_intel_records():
     args = request.args
     page = int(args.get('page', 1))
     page_size = min(int(args.get('page_size', 50)), 500)
-    task_id = args.get('task_id', type=int)
-    partner_id = args.get('partner_id', type=int)
-    source = args.get('source')
-    relevance_min = args.get('relevance_min')
-    since = args.get('since')
-    risk_type = args.get('risk_type')
-    export_tier = args.get('export_tier')
+    filters = _intel_records_filters(args)
     result = list_intel_records(
-        task_id=task_id,
-        partner_id=partner_id,
-        source=source,
-        relevance_min=relevance_min,
-        since=since,
-        risk_type=risk_type,
-        export_tier=export_tier,
         page=page,
         page_size=page_size,
+        **filters,
     )
-    return jsonify({'ok': True, **result})
+    return jsonify({'ok': True, 'applied_filters': filters, **result})
 
 
 @intel_bp.route('/intel/records/<int:record_id>', methods=['GET'])
@@ -645,13 +726,8 @@ def api_analysis_prompts_delete(prompt_id):
 def api_intel_export():
     fmt = request.args.get('format', 'json')
     task_id = request.args.get('task_id', type=int)
-    filters = {}
-    if request.args.get('partner_id'):
-        filters['partner_id'] = int(request.args.get('partner_id'))
-    if request.args.get('source'):
-        filters['source'] = request.args.get('source')
-    if request.args.get('relevance_min'):
-        filters['relevance_min'] = request.args.get('relevance_min')
+    filters = _intel_records_filters(request.args)
+    filters.pop('task_id', None)
     path = write_export_file(fmt, task_id=task_id, **filters)
     return send_file(path, as_attachment=True)
 

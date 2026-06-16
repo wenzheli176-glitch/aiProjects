@@ -34,10 +34,16 @@ function intelFilterParams() {
   const partner = document.getElementById('fPartner');
   const source = document.getElementById('fSource');
   const rel = document.getElementById('fRelevance');
+  const sentiment = document.getElementById('fSentiment');
+  const sMin = document.getElementById('fSentimentMin');
+  const sMax = document.getElementById('fSentimentMax');
   if (task && task.value) params.set('task_id', task.value);
   if (partner && partner.value) params.set('partner_id', partner.value);
   if (source && source.value) params.set('source', source.value);
   if (rel && rel.value) params.set('relevance_min', rel.value);
+  if (sentiment && sentiment.value) params.set('sentiment_label', sentiment.value);
+  if (sMin && sMin.value !== '') params.set('sentiment_score_min', sMin.value);
+  if (sMax && sMax.value !== '') params.set('sentiment_score_max', sMax.value);
   return params;
 }
 
@@ -51,6 +57,9 @@ function syncIntelFiltersFromQuery() {
   set('fPartner', 'partner_id');
   set('fSource', 'source');
   set('fRelevance', 'relevance_min');
+  set('fSentiment', 'sentiment_label');
+  set('fSentimentMin', 'sentiment_score_min');
+  set('fSentimentMax', 'sentiment_score_max');
   if (q.get('task_id')) lastTaskId = parseInt(q.get('task_id'), 10) || lastTaskId;
 }
 
@@ -80,15 +89,33 @@ async function onTasksTabActivate() {
   }
 }
 
-const RUN_GLOSSARY_KEYS = [
-  'trigger', 'analyze_mode', 'status', 'started_at', 'finished_at',
-  'crawl_duration_ms', 'analyze_duration_ms', 'error_message',
-  'raw_new', 'raw_updated', 'raw_unchanged', 'intel_written', 'intel_replaced', 'intel_skipped',
-  'crawl_ms', 'analyze_ms', 'prompt_tokens', 'completion_tokens', 'total_tokens',
+const RUN_GLOSSARY_GROUPS = [
+  {
+    title: 'Run',
+    keys: ['trigger', 'analyze_mode', 'status', 'started_at', 'finished_at', 'error_message'],
+  },
+  {
+    title: 'Timing',
+    keys: ['crawl_duration_ms', 'analyze_duration_ms', 'crawl_ms', 'analyze_ms'],
+  },
+  {
+    title: 'Stats',
+    keys: [
+      'raw_new', 'raw_updated', 'raw_unchanged', 'intel_written', 'intel_replaced', 'intel_skipped',
+      'triage_high', 'triage_medium', 'triage_noise', 'needs_investigation_count',
+      'investigation_queued', 'investigation_done', 'investigation_failed',
+    ],
+  },
+  {
+    title: 'Tokens',
+    keys: ['prompt_tokens', 'completion_tokens', 'total_tokens'],
+  },
 ];
 
 const RUN_STATS_KEYS = [
   'raw_new', 'raw_updated', 'raw_unchanged', 'intel_written', 'intel_replaced', 'intel_skipped',
+  'triage_high', 'triage_medium', 'triage_noise', 'needs_investigation_count',
+  'investigation_queued', 'investigation_done', 'investigation_failed',
 ];
 
 async function api(path, opts = {}) {
@@ -117,16 +144,25 @@ function sourceTag(s) {
   return `<span class="tag ${cls}">${esc(label)}</span>`;
 }
 
+function relLabelText(r) {
+  const cn = { high: '高', medium: '中', low: '低', noise: '无关' };
+  return cn[r] || r || '—';
+}
+
 function relTag(r) {
-  return `<span class="tag tag-${r || 'medium'}">${esc(r || '-')}</span>`;
+  return `<span class="tag tag-${r || 'medium'}">${esc(relLabelText(r))}</span>`;
+}
+
+function sentimentLabelText(label) {
+  const cn = { negative: '负面', neutral: '中性', positive: '正面' };
+  return cn[label] || label || '—';
 }
 
 function sentimentTag(label, score) {
   const cls = { negative: 'tag-off', neutral: 'tag-medium', positive: 'tag-on' };
-  const cn = { negative: '负面', neutral: '中性', positive: '正面' };
   const lbl = label || 'neutral';
   const sc = score != null && score !== '' ? ` (${Number(score).toFixed(2)})` : '';
-  return `<span class="tag ${cls[lbl] || 'tag-medium'}">${cn[lbl] || esc(lbl)}${sc}</span>`;
+  return `<span class="tag ${cls[lbl] || 'tag-medium'}">${esc(sentimentLabelText(lbl))}${sc}</span>`;
 }
 
 function statusTag(s) {
@@ -140,10 +176,6 @@ function partnerName(id) {
 
 function partnerNames(ids) {
   return (ids || []).map(id => partnerName(id)).join('、') || '-';
-}
-
-function fmtTime(s) {
-  return (s || '').replace('T', ' ').slice(0, 16) || '-';
 }
 
 function initTabs() {
@@ -324,6 +356,8 @@ function resetPartnerForm() {
   document.getElementById('pAliases').value = '';
   document.getElementById('pExclude').value = '';
   document.getElementById('pMonitorKw').value = '';
+  document.getElementById('pCohort').value = '';
+  document.getElementById('pPriorityTier').value = 'P1';
   document.getElementById('pNotes').value = '';
   document.getElementById('pEnabled').checked = true;
 }
@@ -336,6 +370,8 @@ function editPartner(id) {
   document.getElementById('pAliases').value = (p.aliases || []).join(', ');
   document.getElementById('pExclude').value = (p.exclude_words || []).join(', ');
   document.getElementById('pMonitorKw').value = (p.monitor_keywords || []).join(', ');
+  document.getElementById('pCohort').value = p.industry_cohort || '';
+  document.getElementById('pPriorityTier').value = p.priority_tier || 'P1';
   document.getElementById('pNotes').value = p.notes || '';
   document.getElementById('pEnabled').checked = !!p.enabled;
 }
@@ -362,6 +398,9 @@ async function savePartner() {
     aliases: document.getElementById('pAliases').value.split(/[,，]/).map(s => s.trim()).filter(Boolean),
     exclude_words: document.getElementById('pExclude').value.split(/[,，]/).map(s => s.trim()).filter(Boolean),
     monitor_keywords: document.getElementById('pMonitorKw').value.split(/[,，]/).map(s => s.trim()).filter(Boolean),
+    industry_cohort: document.getElementById('pCohort').value.trim(),
+    priority_tier: document.getElementById('pPriorityTier').value,
+    priority_source: 'manual',
     notes: document.getElementById('pNotes').value.trim(),
     enabled: document.getElementById('pEnabled').checked,
   };
@@ -439,6 +478,31 @@ function sourceLabel(sid) {
   return sid === 'heimao' ? '黑猫' : (sid === 'xhs' ? '小红书' : sid);
 }
 
+function renderRunDetailError(message) {
+  if (!message) return '';
+  return '<div class="run-detail-error-block">'
+    + '<div class="run-detail-error-head">' + esc(runFieldMeta('error_message').label) + '</div>'
+    + '<pre class="run-detail-error-trace">' + esc(message) + '</pre>'
+    + '</div>';
+}
+
+function renderRunDetailGlossary() {
+  const groups = RUN_GLOSSARY_GROUPS.map(function(group) {
+    const rows = group.keys.map(function(key) {
+      const m = runFieldMeta(key);
+      const help = m.help ? esc(m.help) : '—';
+      return '<tr><td class="field-key"><code>' + esc(key) + '</code></td>'
+        + '<td class="field-help">' + help + '</td></tr>';
+    }).join('');
+    return '<div class="run-glossary-group">'
+      + '<div class="run-glossary-group-title">' + esc(group.title) + '</div>'
+      + '<table class="run-glossary-table"><thead><tr><th>Field</th><th>Description</th></tr></thead>'
+      + '<tbody>' + rows + '</tbody></table></div>';
+  }).join('');
+  return '<details class="run-detail-glossary"><summary>Field reference</summary>'
+    + '<div class="run-glossary-groups">' + groups + '</div></details>';
+}
+
 function buildRunDetailHtml(run, task) {
   const totalMs = (run.crawl_duration_ms || 0) + (run.analyze_duration_ms || 0);
   let html = '<div class="run-detail-drawer">';
@@ -451,20 +515,17 @@ function buildRunDetailHtml(run, task) {
     + '<div class="run-detail-kv"><span class="k">' + esc(runFieldLabel('finished_at')) + '</span><span class="v">' + fmtTime(run.finished_at) + '</span></div>'
     + '<div class="run-detail-kv"><span class="k">' + esc(runFieldLabel('crawl_duration_ms')) + '</span><span class="v">' + fmtDuration(run.crawl_duration_ms) + '</span></div>'
     + '<div class="run-detail-kv"><span class="k">' + esc(runFieldLabel('analyze_duration_ms')) + '</span><span class="v">' + fmtDuration(run.analyze_duration_ms) + '</span></div>'
+    + (run.triage_duration_ms != null ? '<div class="run-detail-kv"><span class="k">初筛耗时</span><span class="v">' + fmtDuration(run.triage_duration_ms) + '</span></div>' : '')
+    + (run.investigation_crawl_duration_ms != null ? '<div class="run-detail-kv"><span class="k">勘察耗时</span><span class="v">' + fmtDuration(run.investigation_crawl_duration_ms) + '</span></div>' : '')
     + '</div>';
+  if (run.error_message) {
+    html += renderRunDetailError(run.error_message);
+  }
   html += '<h4 class="run-detail-section">统计指标</h4>' + renderRunDetailStats(run.stats);
   html += '<h4 class="run-detail-section">分源耗时</h4>' + renderRunDetailTiming(run.timing_by_source);
   html += '<h4 class="run-detail-section">Token 用量</h4>' + renderRunDetailToken(run.token_usage);
-  if (run.error_message) {
-    html += '<div class="run-detail-error"><strong>' + esc(runFieldMeta('error_message').label) + '</strong><br>' + esc(run.error_message) + '</div>';
-  }
-  html += '<details class="run-detail-glossary"><summary>字段说明</summary><dl>';
-  html += RUN_GLOSSARY_KEYS.map(function(key) {
-    const m = runFieldMeta(key);
-    const help = m.help ? esc(m.help) : '—';
-    return '<dt>' + esc(runFieldLabel(key)) + '</dt><dd>' + help + '</dd>';
-  }).join('');
-  html += '</dl></details></div>';
+  html += renderRunDetailGlossary();
+  html += '</div>';
   return html;
 }
 
@@ -519,6 +580,7 @@ function renderRunDetailTiming(timing) {
     const t = timing[sid] || {};
     return '<tr><td>' + sourceTag(sid) + '</td>'
       + '<td>' + fmtDuration(t.crawl_ms) + '</td>'
+      + '<td>' + fmtDuration(t.investigation_crawl_ms || 0) + '</td>'
       + '<td>' + fmtDuration(t.analyze_ms) + '</td>'
       + '<td>' + (t.raw_new || 0) + '</td>'
       + '<td>' + (t.raw_updated || 0) + '</td>'
@@ -526,7 +588,7 @@ function renderRunDetailTiming(timing) {
   }).join('');
   return '<table class="run-detail-table"><thead><tr>'
     + '<th>来源</th><th>' + esc(runFieldMeta('crawl_ms').label) + '</th>'
-    + '<th>' + esc(runFieldMeta('analyze_ms').label) + '</th>'
+    + '<th>勘察</th><th>' + esc(runFieldMeta('analyze_ms').label) + '</th>'
     + '<th>' + esc(runFieldMeta('raw_new').label) + '</th>'
     + '<th>' + esc(runFieldMeta('raw_updated').label) + '</th>'
     + '<th>' + esc(runFieldMeta('intel_written').label) + '</th>'
@@ -556,6 +618,21 @@ function renderRunDetailToken(usage) {
     + '<td>' + (total.total_tokens || 0) + '</td></tr></tfoot></table>';
 }
 
+function renderRunHistoryStatHeaders() {
+  return RUN_STATS_KEYS.map(function(key) {
+    const m = runFieldMeta(key);
+    const title = m.help ? ' title="' + esc(m.help) + '"' : '';
+    return '<th' + title + '>' + esc(m.label) + '</th>';
+  }).join('');
+}
+
+function renderRunHistoryStatCells(stats) {
+  stats = stats || {};
+  return RUN_STATS_KEYS.map(function(key) {
+    return '<td class="num">' + (stats[key] != null ? stats[key] : 0) + '</td>';
+  }).join('');
+}
+
 function renderRunSummaryRow(r, taskId) {
   const total = (r.crawl_duration_ms || 0) + (r.analyze_duration_ms || 0);
   const st = r.stats || {};
@@ -567,7 +644,7 @@ function renderRunSummaryRow(r, taskId) {
     + '<td>' + esc(runModeLabel(r.analyze_mode)) + '</td>'
     + '<td>' + statusTag(r.status) + '</td>'
     + '<td>' + fmtDuration(total) + '</td>'
-    + '<td class="meta">+' + (st.raw_new || 0) + ' / ↑' + (st.raw_updated || 0) + ' / intel ' + (st.intel_written || 0) + '</td>'
+    + renderRunHistoryStatCells(st)
     + '</tr>';
 }
 
@@ -586,9 +663,10 @@ function renderRunHistoryContent(taskId) {
       + '<button type="button" class="btn btn-gray btn-sm" onclick="loadMoreRuns(' + taskId + ')"'
       + (st.loading ? ' disabled' : '') + '>' + (st.loading ? '加载中…' : '加载更多') + '</button></div>'
     : '<div class="run-history-footer"><span class="meta">共 ' + st.total + ' 条</span></div>';
-  return '<table class="run-summary-table"><thead><tr>'
-    + '<th>Run</th><th>开始</th><th>触发</th><th>模式</th><th>状态</th><th>耗时</th><th>统计</th>'
-    + '</tr></thead><tbody>' + rows + '</tbody></table>' + footer;
+  return '<div class="run-history-scroll"><table class="run-summary-table"><thead><tr>'
+    + '<th>Run</th><th>开始</th><th>触发</th><th>模式</th><th>状态</th><th>耗时</th>'
+    + renderRunHistoryStatHeaders()
+    + '</tr></thead><tbody>' + rows + '</tbody></table></div>' + footer;
 }
 
 async function fetchRunHistoryPage(taskId, reset) {
@@ -676,6 +754,7 @@ function buildTaskPayload() {
     partner_ids: getSelectedPartnerIds(),
     sources: getSelectedSourceIds(),
     max_pages: parseInt(document.getElementById('tPages').value, 10) || 2,
+    crawl_mode: document.getElementById('tCrawlMode').value || 'list_first',
     fetch_detail: document.getElementById('tFetchDetail').checked,
     schedule,
   };
@@ -730,7 +809,8 @@ function resetTaskForm() {
   document.getElementById('editingTaskId').value = '';
   document.getElementById('tName').value = '';
   document.getElementById('tPages').value = '2';
-  document.getElementById('tFetchDetail').checked = true;
+  document.getElementById('tCrawlMode').value = 'list_first';
+  document.getElementById('tFetchDetail').checked = false;
   renderPartnerChecks([]);
   renderSourceChecks();
   if (window.SchedulePicker) SchedulePicker.fillScheduleForm({ enabled: false });
@@ -740,6 +820,7 @@ function fillTaskForm(t) {
   document.getElementById('editingTaskId').value = t.id;
   document.getElementById('tName').value = t.name || '';
   document.getElementById('tPages').value = t.max_pages || 2;
+  document.getElementById('tCrawlMode').value = t.crawl_mode || 'legacy';
   document.getElementById('tFetchDetail').checked = !!t.fetch_detail;
   renderPartnerChecks(t.partner_ids || []);
   renderSourceChecks(t.sources || []);
@@ -874,15 +955,24 @@ function viewTaskIntel(task_id) {
   App.navigateIntel({ task_id: task_id });
 }
 
-function onTaskFilterChange() {
+function onIntelFilterChange() {
   lastTaskId = parseInt(document.getElementById('fTask').value, 10) || null;
   App.setQuery({
-    task_id: lastTaskId || null,
+    tab: 'intel',
+    intel_id: null,
+    task_id: document.getElementById('fTask').value || null,
     partner_id: document.getElementById('fPartner').value || null,
     source: document.getElementById('fSource').value || null,
     relevance_min: document.getElementById('fRelevance').value || null,
+    sentiment_label: document.getElementById('fSentiment').value || null,
+    sentiment_score_min: document.getElementById('fSentimentMin').value || null,
+    sentiment_score_max: document.getElementById('fSentimentMax').value || null,
   }, true);
   loadRecords();
+}
+
+function onTaskFilterChange() {
+  onIntelFilterChange();
 }
 
 async function pollTask(id) {
@@ -916,7 +1006,16 @@ async function loadRecords() {
     return;
   }
   const rows = d.records || [];
-  document.getElementById('recordCount').textContent = '(共 ' + (d.total || rows.length) + ' 条)';
+  const applied = d.applied_filters || {};
+  const sentimentFilter = document.getElementById('fSentiment') && document.getElementById('fSentiment').value;
+  if (sentimentFilter && rows.length && rows.some(function(r) { return r.sentiment_label !== sentimentFilter; })) {
+    toastMsg('情感筛选未在后端生效，请重启 crawler_web.py', true);
+  }
+  const countBits = ['共 ' + (d.total || rows.length) + ' 条'];
+  if (applied.sentiment_label) countBits.push(sentimentLabelText(applied.sentiment_label));
+  if (applied.sentiment_score_min != null) countBits.push('分数≥' + applied.sentiment_score_min);
+  if (applied.sentiment_score_max != null) countBits.push('分数≤' + applied.sentiment_score_max);
+  document.getElementById('recordCount').textContent = '(' + countBits.join(' · ') + ')';
   const body = document.getElementById('recordBody');
   if (!rows.length) {
     body.innerHTML = '<tr><td colspan="10" class="empty">暂无数据</td></tr>';
@@ -961,8 +1060,10 @@ async function showIntelDetail(intelId) {
       + intelMetaRow('合作方', r.partner_name || ('#' + r.partner_id))
       + intelMetaRow('任务', '#' + r.task_id)
       + intelMetaRow('来源', r.source)
-      + intelMetaRow('相关度', r.relevance)
-      + intelMetaRow('情感', (r.sentiment_label || '') + (r.sentiment_score != null ? ' (' + Number(r.sentiment_score).toFixed(2) + ')' : ''))
+      + intelMetaRow('相关度', relLabelText(r.relevance))
+      + intelMetaRow('置信度', r.confidence != null ? Number(r.confidence).toFixed(2) : '')
+      + intelMetaRow('情感', sentimentLabelText(r.sentiment_label)
+        + (r.sentiment_score != null ? ' (' + Number(r.sentiment_score).toFixed(2) + ')' : ''))
       + intelMetaRow('风险类型', (r.risk_types || []).join('、') || '—')
       + intelMetaRow('发布时间', fmtTime(r.published_at))
       + intelMetaRow('采集时间', fmtTime(r.captured_at))

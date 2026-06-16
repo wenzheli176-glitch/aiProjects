@@ -8,6 +8,7 @@ import time
 
 from config import cfg
 from intel.db import list_raw_records_paged
+from intel.time_util import now_iso
 
 RAW_EXPORT_COLUMNS = [
     ('id', 'id'),
@@ -16,6 +17,7 @@ RAW_EXPORT_COLUMNS = [
     ('source', '数据来源'),
     ('keyword', '关键词'),
     ('title_summary', '标题/摘要'),
+    ('published_at', '发布时间'),
     ('created_at', '创建时间'),
     ('updated_at', '更新时间'),
     ('dedup_key', 'dedup_key'),
@@ -38,7 +40,7 @@ def build_raw_export_payload(**filters):
     result = list_raw_records_paged(page=1, page_size=100000, include_payload=True, **filters)
     return {
         'schema_version': cfg('intel', 'schema_version', default='1.1'),
-        'exported_at': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'exported_at': now_iso(),
         'count': len(result['records']),
         'records': result['records'],
     }

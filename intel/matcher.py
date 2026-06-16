@@ -42,6 +42,21 @@ def match_partner(normalized, partner, task_partner_id=None):
     }
 
 
+def match_all_partners(normalized, partners, min_hits=1):
+    """返回所有命中的合作方（排除词且无命中则跳过）。"""
+    hits = []
+    for p in partners:
+        m = match_partner(normalized, p)
+        if m['excluded'] and not m['subject_hits']:
+            continue
+        if m['subject_hits'] or m.get('matched'):
+            hits.append(m)
+    if not hits:
+        return []
+    hits.sort(key=lambda m: max((len(h) for h in m['subject_hits']), default=0), reverse=True)
+    return hits
+
+
 def match_best_partner(normalized, partners, default_partner_id=None):
     best = None
     best_len = -1

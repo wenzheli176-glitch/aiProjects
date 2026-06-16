@@ -31,15 +31,15 @@ TBD - created by archiving change monitor-runs-schedule-incremental. Update Purp
 
 #### Scenario: 分源爬取计时
 
-- **当** `run_monitor_task` 对每个 source 调用 `CrawlAdapter.crawl`
-- **则** 必须累计该 source 的 `crawl_ms`
+- **当** `run_monitor_task` 对每个 source 调用 CrawlAdapter（含 crawl_list_batch 与 crawl_investigation）
+- **则** 必须分别累计 list_crawl_ms 与 investigation_crawl_ms 至该 source
 - **且** 必须记录 `raw_new` 与 `raw_updated` 计数
 
 #### Scenario: 分源分析计时
 
-- **当** `analyze_candidates` 完成一批 LLM 调用
-- **则** 必须按批内各 source 候选条数比例分摊该批 wall time 至 `analyze_ms`
-- **且** 必须与 token 分摊使用相同 source 分组
+- **当** list_triage 或 analyze_candidates 完成 LLM 调用
+- **则** 必须将 list_triage 耗时计入 `triage_ms`（run 级或 by_source）
+- **且** 完整 analyze 耗时仍计入 analyze_ms
 
 ### Requirement: 分源 Token 汇总
 
@@ -127,4 +127,24 @@ TBD - created by archiving change monitor-runs-schedule-incremental. Update Purp
 - **当** 用户点击任务「编辑」
 - **则** 必须在 Modal 中加载该任务数据
 - **且** 运行中任务 MUST 禁用编辑
+
+### Requirement: Stage2 多阶段 Run 进度
+
+系统 SHALL 在 `crawl_mode=list_first` 的 run 中，progress JSON 必须反映四阶段：`list_crawl`、`list_triage`、`investigation_crawl`、`analyze`。
+
+#### Scenario: 阶段切换
+
+- **当** list_crawl 完成
+- **则** progress.phase 必须变为 list_triage
+- **且** stats_json 必须含 list_raw_new、list_raw_updated
+
+#### Scenario: 勘察统计
+
+- **当** investigation_crawl 结束
+- **则** stats_json 必须含 investigation_queued、investigation_done、investigation_failed
+
+#### Scenario: 初筛统计
+
+- **当** list_triage 结束
+- **则** stats_json 必须含 triage_high、triage_medium、triage_noise、needs_investigation_count
 

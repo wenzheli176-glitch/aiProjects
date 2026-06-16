@@ -57,7 +57,14 @@ TBD - created by archiving change partner-risk-intel. Update Purpose after archi
 
 - **当** NormalizeAdapter 输出记录
 - **则** 每条必须包含 `source`、`external_id`、`url`、`title`、`body`
-- **且** `published_at` 必须尽力解析为 ISO 8601 或留空；扩展字段必须放入 `extra` JSON
+- **且** `published_at` 必须为日期级 ISO 8601（`YYYY-MM-DD`）或空字符串
+- **且** 解析 MUST 通过共用 `parse_published_date`，以 raw `captured_at`（或 raw `created_at`）为相对时间锚点
+- **且** 扩展字段必须放入 `extra` JSON
+
+#### Scenario: 详情时间覆盖列表
+
+- **当** raw payload 同时含列表级 `time` 与详情级 `time`（detail-phase）
+- **则** NormalizeAdapter MUST 优先采用详情时间解析 `published_at`
 
 #### Scenario: heimao 归一化
 
@@ -70,6 +77,26 @@ TBD - created by archiving change partner-risk-intel. Update Purpose after archi
 - **当** 源为 xhs
 - **则** NormalizeAdapter 必须基于 `structure_xhs_record`（待实现）映射
 - **且** `external_id` 必须为笔记 id 或 url 稳定片段
+
+### Requirement: 发布时间日期解析
+
+系统 SHALL 提供 `parse_published_date(text, anchor_date)`，将黑猫/小红书常见时间文本规范为 `YYYY-MM-DD`。
+
+#### Scenario: 绝对日期
+
+- **当** 输入含 `YYYY-MM-DD` 或可解析的日期文本
+- **则** 必须返回该日期字符串
+
+#### Scenario: 相对时间
+
+- **当** 输入为「N天前」「昨天」「今天」等相对表述
+- **则** 必须基于 `anchor_date` 反推并返回 `YYYY-MM-DD`
+
+#### Scenario: 无法解析
+
+- **当** 输入为空或无法识别
+- **则** 必须返回空字符串
+- **且** 不得伪造日期
 
 ### Requirement: 源级 CrawlProfile 配置
 
@@ -89,18 +116,33 @@ TBD - created by archiving change partner-risk-intel. Update Purpose after archi
 
 ### Requirement: max_pages 跨源统一语义
 
-系统 SHALL 将 MonitorTask 与 CrawlAdapter 的 `max_pages` 参数定义为 **结果采集页数 M**：对 heimao 为 URL 分页 1..M，对 xhs 为 M 次滚动采集轮次；两源 MUST 使用一致的「第 i/M 页」日志与 RawRecord `page` 字段 1..M。
+系统 SHALL 将 MonitorTask 与 CrawlAdapter 的 `max_pages` 参数定义为 **结果采集页数上限 M**：对 heimao 为 URL 分页最多 1..M，对 xhs 为最多 M 次滚动采集轮次；两源 MUST 使用一致的「第 i/M 页」日志与 RawRecord `page` 字段（`page` 为实际采集页码，1≤page≤i≤M）。当 `early_stop.enabled=true` 且检测到分页见底时，实际采集页数 i  MAY 小于 M。
 
 #### Scenario: 黑猫分页语义不变
 
 - **当** heimao CrawlAdapter 收到 `max_pages=M`
-- **则** 必须访问搜索 URL 第 1 至 M 页
+- **则** 必须访问搜索 URL 第 1 页起顺序分页，最多至第 M 页
 - **且** 日志必须使用「黑猫第 i/M 页」格式
+
+#### Scenario: 黑猫分页见底早停
+
+- **当** `config.heimao.early_stop.enabled=true`
+- **且** 已连续 `empty_pages_threshold` 页无新链接（`seen` 去重后 `new_count=0`）
+- **且** 当前页码 i ≥ `min_pages`
+- **则** 必须停止后续分页
+- **且** 日志必须包含 `early_stop: heimao · reason=empty_page · stopped_at=i/M`
+
+#### Scenario: 黑猫第 1 页零结果保护
+
+- **当** `protect_first_page=true` 且第 1 页 `new_count=0`
+- **则** 必须重试搜索或等待（次数 ≤ `empty_page_retry`），复用 `login_gate` 既有等待逻辑
+- **且** 重试后仍无新链接时必须停止，不得无意义翻至第 2 页
+- **且** 第 1 页零结果 alone 不得计入连续空页阈值（除非重试后仍空并停止）
 
 #### Scenario: 小红书页数与黑猫对齐
 
 - **当** xhs CrawlAdapter 收到 `max_pages=M`
-- **则** 必须执行 M 次结果采集迭代（非「滚动次数」独立参数）
+- **则** 必须执行最多 M 次结果采集迭代（非「滚动次数」独立参数）
 - **且** 起始日志必须使用「开始爬取小红书: {keyword} {M}页」，不得使用「滚动 N 次」作为主语义
 - **且** 循环内日志必须使用「XHS第 i/M 页」或「小红书第 i/M 页」
 
@@ -110,11 +152,33 @@ TBD - created by archiving change partner-risk-intel. Update Purpose after archi
 - **则** 在 `query_selector_all` 之前 MUST 按 `config.xhs.scroll_times_per_page`（及 `scroll_pixels`、`scroll_wait_seconds`）滚动加载
 - **且** 第 1 页与后续页 MUST 使用相同滚动预热逻辑
 
+#### Scenario: 小红书 end 标志早停
+
+- **当** `config.xhs.early_stop.enabled=true`
+- **且** 滚动预热后页面出现 `end_texts` 中任一条（默认含 `- THE END -`）或匹配 `end_selectors`
+- **且** 当前轮次 i ≥ `min_pages`
+- **则** 必须停止后续滚动轮次
+- **且** 日志必须包含 `early_stop: xhs · reason=end_marker · stopped_at=i/M`
+
+#### Scenario: 小红书滚动饱和早停
+
+- **当** `config.xhs.early_stop.enabled=true`
+- **且** 连续 `saturation_rounds` 轮满足：本轮 `new_count=0` 且 note-item 总数较上一轮未增加
+- **且** 当前轮次 i ≥ `min_pages`
+- **则** 必须停止后续滚动轮次
+- **且** 日志必须包含 `early_stop: xhs · reason=scroll_saturated · stopped_at=i/M`
+
+#### Scenario: 早停关闭跑满上限
+
+- **当** `config.{source}.early_stop.enabled=false`
+- **则** 必须采集至第 M 页/轮（不因见底提前结束）
+- **且** 不得应用本变更新增的 empty_page / end_marker / scroll_saturated 早停逻辑
+
 #### Scenario: MonitorTask 单一 max_pages
 
 - **当** MonitorRunner 为各源传递 `task.max_pages`
 - **则** heimao 与 xhs 必须接收相同数值
-- **且** 不得在本变更中引入 per-source 独立页数字段
+- **且** 不得引入 per-source 独立页数字段
 
 ### Requirement: 数据源管理 UI
 
@@ -190,4 +254,80 @@ TBD - created by archiving change partner-risk-intel. Update Purpose after archi
 - **当** `GET /api/sources/heimao/profile`
 - **则** 响应必须包含 normalize 键列表与当前值
 - **且** `PATCH` 仅接受白名单 normalize 键
+
+### Requirement: CrawlAdapter 列表批次模式
+
+系统 SHALL 为 CrawlAdapter 提供 `crawl_list_batch(ctx, task, keyword_batch, options)`，内部固定 `fetch_detail=false`。
+
+#### Scenario: 黑猫列表批次
+
+- **当** heimao adapter 执行 crawl_list_batch
+- **则** 必须调用 crawl_heimao(keyword, max_pages, fetch_detail=False)
+- **且** 仍必须通过搜索框输入关键词
+
+#### Scenario: 小红书列表批次
+
+- **当** xhs adapter 执行 crawl_list_batch
+- **则** 必须调用 crawl_xhs(..., fetch_detail=False)
+- **且** 不要求登录即可列表（与现有 xhs-login-gate 一致）
+
+### Requirement: CrawlAdapter 勘察详情模式
+
+系统 SHALL 提供 `crawl_investigation(ctx, task, urls[], options)`，仅对给定 URL 列表抓详情。
+
+#### Scenario: 黑猫勘察
+
+- **当** heimao investigation 执行
+- **则** 必须 new_page 打开详情
+- **且** 未登录时必须走 login_gate
+
+#### Scenario: 小红书勘察
+
+- **当** xhs investigation 执行
+- **则** 必须调用 `fetch_xhs_details_by_urls` 的弹窗实现（`xhs_detail.find_note_item_for_url` + `fetch_xhs_detail_via_modal`）
+- **且** 不得对笔记 explore URL 使用 `page.goto` 作为主详情策略
+- **且** fetch_detail=true 时必须走 xhs 登录门禁
+- **且** 必须从关联 raw 读取搜索 keyword 用于 search_result 上下文与批量重搜
+
+#### Scenario: 勘察 DOM 失败不阻塞任务
+
+- **当** 单条 URL DOM 定位失败且已满足 skip/重搜规则
+- **则** 必须标记该条 investigation 失败并继续队列
+- **且** 不得因单条失败 abort 整个 monitor task
+
+### Requirement: MonitorTask fetch_detail 语义
+
+系统 SHALL 在 `crawl_mode=list_first` 下忽略 task 级 `fetch_detail=true` 对 routine crawl 的影响；详情仅由 investigation 阶段触发。
+
+#### Scenario: 列表优先默认
+
+- **当** crawl_mode=list_first
+- **则** routine crawl 必须等价 fetch_detail=false
+- **且** UI 必须说明详情在勘察阶段补抓
+
+### Requirement: 源级 early_stop 配置
+
+系统 SHALL 在 `config.heimao.early_stop` 与 `config.xhs.early_stop` 提供分源早停配置；`crawler_web.py` MUST 在 `crawl_heimao` / `crawl_xhs` 读取并应用。CrawlProfile API MAY 通过白名单暴露 `early_stop` 对象。
+
+#### Scenario: 默认配置
+
+- **当** 未在 `config.json` 中覆盖 early_stop
+- **则** 必须使用 `config.py` DEFAULT 中各源 early_stop 默认值（`enabled=true`）
+- **且** xhs 默认 `end_texts` 必须包含 `- THE END -`
+
+#### Scenario: heimao early_stop 键
+
+- **当** 读取 `config.heimao.early_stop`
+- **则** 必须支持：`enabled`、`min_pages`、`empty_pages_threshold`、`protect_first_page`、`empty_page_retry`
+
+#### Scenario: xhs early_stop 键
+
+- **当** 读取 `config.xhs.early_stop`
+- **则** 必须支持：`enabled`、`min_pages`、`protect_first_page`、`end_texts`、`end_selectors`、`saturation_rounds`
+
+#### Scenario: list_first 与调试爬取共用
+
+- **当** MonitorRunner 调用 `crawl_list_batch` 或客户端调用 `/api/crawl_heimao`、`/api/crawl_xhs`
+- **则** 早停行为必须与对应源 `crawl_*` 一致
+- **且** 不得仅在某一入口启用早停
 

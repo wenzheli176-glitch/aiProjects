@@ -42,19 +42,24 @@
 | POST | `/partners` | 创建（**需管理员**） |
 | PUT | `/partners/{id}` | 更新（**需管理员**） |
 | DELETE | `/partners/{id}` | 删除（**需管理员**） |
+| GET | `/partners/priority` | 各合作方 P0/P1/P2 定级与来源 |
+| PATCH | `/partners/{id}/priority` | 业务指定 `{tier, reason?}` → `priority_source=business` |
+| POST | `/partners/bulk-priority` | 批量 `{items:[{partner_id,tier,reason?}]}` |
+
+合作方字段扩展：`industry_cohort`（行业 cohort）、`priority_tier`（P0/P1/P2）。
 
 ## 监测任务（手动 / 定时）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/monitor/tasks` | 任务列表（含 `schedule`、`last_run`、`next_run_at`） |
-| POST | `/monitor/tasks` | 创建（**需管理员**）`{name, partner_ids[], sources[], max_pages, fetch_detail, schedule?}` |
+| POST | `/monitor/tasks` | 创建（**需管理员**）`{name, partner_ids[], sources[], max_pages, crawl_mode?, fetch_detail?, schedule?}` |
 | GET | `/monitor/tasks/{id}` | 任务详情与状态 |
 | PUT | `/monitor/tasks/{id}` | 更新（**需管理员**），可含 `schedule` |
 | DELETE | `/monitor/tasks/{id}` | 删除（**需管理员**） |
 | GET | `/monitor/tasks/{id}/runs` | Run 历史（分页） |
 | GET | `/monitor/runs/{run_id}` | Run 详情（分源 timing/token） |
-| POST | `/monitor/run` | 执行 `{task_id, analyze_mode?: incremental\|full_replace}` |
+| POST | `/monitor/run` | 执行 `{task_id, analyze_mode?, business_spec?}`；`business_spec` 可含 `force_investigation_partner_ids[]`、`min_triage_relevance` |
 | POST | `/monitor/reanalyze` | 重跑 AI `{task_id, analyze_mode: incremental\|full_replace}`（`replace` 仍映射 full_replace） |
 
 `schedule` 对象：`{enabled, cron, timezone, preset_id, skip_if_running}`。Cron 由 Web UI 生成，不建议手改。

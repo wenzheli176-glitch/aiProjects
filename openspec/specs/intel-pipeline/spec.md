@@ -11,12 +11,12 @@ TBD - created by archiving change partner-risk-intel. Update Purpose after archi
 
 - **当** NormalizedRecord 的 title 或 body 包含某合作方别名
 - **则** 必须设置 `partner_id` 与 `subject_hits` 包含该别名
-- **且** 一条记录仅关联一个主 partner（多命中时取最长匹配或任务上下文优先）
+- **且** 在 shared-crawl-pool 模式下 MUST 支持一条 raw 匹配多个 partner 并分别展开 intel
 
 #### Scenario: 无匹配仍保留
 
 - **当** 规则层无法匹配任何 partner
-- **则** 记录仍必须进入 AI 候选池（`partner_id` 可为空或 task 默认方）
+- **则** 记录仍必须进入 triage/分析候选池
 - **且** 高召回策略下不得因未匹配而丢弃 raw 数据
 
 ### Requirement: AnalyzePipeline 异步批处理
@@ -38,8 +38,15 @@ TBD - created by archiving change partner-risk-intel. Update Purpose after archi
 #### Scenario: 结构化 JSON 输出
 
 - **当** 模型返回成功
-- **则** 必须解析为 `relevance`、`risk_types`、`summary`、`subject_hits`
+- **则** 必须解析为 `relevance`、`confidence`、`risk_types`、`summary`、`subject_hits`、`sentiment`、`sentiment_score`
+- **且** `confidence` MUST 为 0.0~1.0 浮点数（LLM 自报）
 - **且** 必须写入 `intel_records` 并记录 `model` 与 `prompt_version`
+
+#### Scenario: 分析输入含发布时间
+
+- **当** 构建 LLM 批次
+- **则** 每条输入 MUST 包含 `published_at`（`YYYY-MM-DD` 或空）与 `captured_at`
+- **且** prompt MUST 指导模型结合发布时间评估风险时效与 confidence
 
 #### Scenario: 分析失败可重试
 
@@ -54,7 +61,7 @@ TBD - created by archiving change partner-risk-intel. Update Purpose after archi
 #### Scenario: 必填字段
 
 - **当** 写入 intel_records
-- **则** 必须包含 `task_id`、`partner_id`、`source`、`url`、`title`、`relevance`、`captured_at`
+- **则** 必须包含 `task_id`、`partner_id`、`source`、`url`、`title`、`relevance`、`confidence`、`captured_at`
 - **且** 必须包含 `schema_version` 便于 API 消费者版本化
 - **且** `captured_at` 必须来自关联 raw_record 的 `created_at`，不得使用 AI 写入时刻
 
@@ -69,6 +76,35 @@ TBD - created by archiving change partner-risk-intel. Update Purpose after archi
 - **当** `relevance` 为 high 或 medium
 - **则** 默认 `export_tier=include`
 - **且** 不确定项必须可标 `export_tier=review` 而非直接 exclude
+
+### Requirement: Recency 后处理降档 relevance
+
+系统 SHALL 在 LLM 返回 relevance 后应用确定性 recency 后处理，写入最终 `relevance`；MUST 保留 LLM 原始档位于 `extra.relevance_llm`（或等价字段）。
+
+#### Scenario: 30 天降 high
+
+- **当** `analysis.recency.enabled=true`
+- **且** `published_at` 可解析且距 `captured_at` 超过 `downgrade_days_high_to_medium`（默认 30）天
+- **且** LLM 输出 `relevance=high`
+- **则** 最终 `relevance` MUST 为 `medium`
+
+#### Scenario: 90 天降 medium
+
+- **当** `published_at` 可解析且 age 超过 `downgrade_days_medium_to_low`（默认 90）天
+- **且** LLM 输出 `relevance=medium`（或已被上一步降为 medium 的 high）
+- **则** 最终 `relevance` MUST 为 `low`
+
+#### Scenario: 低 confidence 降档
+
+- **当** LLM `confidence` 低于 `confidence_downgrade_threshold`（默认 0.4）
+- **且** 当前 relevance 不为 `noise`
+- **则** MUST 降一档（high→medium→low→low）
+
+#### Scenario: 无 published_at 不降 age 档
+
+- **当** `published_at` 为空
+- **则** MUST NOT 因 age 规则降档
+- **且** LLM 仍 MAY 输出 `relevance=high`
 
 ### Requirement: 去重与审计
 
@@ -214,4 +250,36 @@ TBD - created by archiving change partner-risk-intel. Update Purpose after archi
 - **当** `_run_analysis_phase` 创建 analysis_job
 - **则** 必须写入当前 run_id
 - **且** analysis_job_logs 必须可通过 run_id 聚合
+
+### Requirement: 部分字段 NormalizedRecord
+
+系统 SHALL 允许 NormalizedRecord 在 list-phase 缺少 body、published_at 等字段仍进入管道。
+
+#### Scenario: 列表档归一化
+
+- **当** raw 的 crawl_phase=list 且 payload 仅有 title 与 link
+- **则** NormalizeAdapter 必须产出有效 NormalizedRecord
+- **且** 不得因 body 为空丢弃 raw
+
+#### Scenario: 勘察后补全
+
+- **当** investigation 更新 payload
+- **则** 归一化 MUST 合并 list 与 detail 字段
+- **且** content_hash 变更必须触发增量重分析
+
+### Requirement: 分级 AnalyzePipeline
+
+系统 SHALL 区分 List Triage（轻量）、Routine Analyze（可选）、Investigation Analyze（完整）三档 LLM 调用。
+
+#### Scenario: Routine 跳过完整 LLM
+
+- **当** raw 仅 list-phase 且 triage_relevance=noise
+- **则** 不得调用完整 AnalyzePipeline
+- **且** 可仅持久化 triage 结果或写轻量 intel 行（可配置）
+
+#### Scenario: Investigation 必须完整分析
+
+- **当** raw crawl_phase=detail 且来自 investigation 队列
+- **则** 必须调用完整 AnalyzePipeline
+- **且** 必须写入标准 intel_records
 

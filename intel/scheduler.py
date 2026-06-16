@@ -3,6 +3,7 @@
 import threading
 
 from config import cfg
+from intel.time_util import app_tz
 
 _scheduler = None
 _scheduler_lock = threading.Lock()
@@ -124,4 +125,4 @@ def get_next_run_at(task_id):
     job = sched_obj.get_job(_job_id(task_id))
     if not job or not job.next_run_time:
         return None
-    return job.next_run_time.strftime('%Y-%m-%dT%H:%M:%SZ')
+    return job.next_run_time.astimezone(app_tz()).strftime('%Y-%m-%dT%H:%M:%S')

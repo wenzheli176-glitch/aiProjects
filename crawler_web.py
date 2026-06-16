@@ -31,7 +31,12 @@ from login_gate import (
     wait_for_site_login,
     xhs_wait_if_search_blocked,
 )
-from xhs_detail import fetch_xhs_detail_via_modal
+from xhs_detail import (
+    fetch_xhs_detail_via_modal,
+    find_note_item_for_url,
+    parse_xhs_note_id,
+    scroll_search_for_note,
+)
 from heimao_session import (
     count_heimao_complaint_links,
     ensure_heimao_detail_url,
@@ -39,11 +44,12 @@ from heimao_session import (
     heimao_listing_has_sid_in_links,
     open_heimao_login_page,
 )
-from reports import (
-    structure_heimao_record,
-    structure_heimao_list,
-    build_heimao_report_html,
-    build_heimao_report_csv_rows,
+from crawl_early_stop import (
+    early_stop_cfg,
+    format_early_stop_log,
+    heimao_should_stop_after_page,
+    xhs_should_stop_end_marker,
+    xhs_update_saturation,
 )
 
 app = Flask(__name__, template_folder='templates', static_folder='static')
@@ -68,7 +74,10 @@ def log(msg, level='INFO'):
         S.logs.append({'time': ts, 'level': level, 'msg': msg})
         if len(S.logs) > max_logs:
             S.logs = S.logs[-max_logs:]
-    print('[%s][%s] %s' % (ts, level, msg))
+    try:
+        print('[%s][%s] %s' % (ts, level, msg))
+    except OSError:
+        pass
 
 S.log = log
 
@@ -238,7 +247,7 @@ def prepare_browser_for_crawl():
             return True
     return False
 
-def crawl_heimao(keyword, max_pages, fetch_detail=True, managed_session=False):
+def crawl_heimao(keyword, max_pages, fetch_detail=True, managed_session=False, timeout_check=None):
     h = _c()['heimao']
     if not managed_session:
         S.running = True
@@ -318,9 +327,15 @@ def crawl_heimao(keyword, max_pages, fetch_detail=True, managed_session=False):
         ) == 0:
             first_html = _redo_heimao_search() or first_html
 
+        es = early_stop_cfg('heimao', h)
+        consecutive_empty = 0
+
         for p in range(1, max_pages + 1):
             if not S.running:
                 log('已停止', 'WARN')
+                break
+            if timeout_check and timeout_check():
+                log('监测任务超时，停止黑猫爬取', 'WARN')
                 break
             log('黑猫第 %d/%d 页' % (p, max_pages))
             try:
@@ -332,110 +347,139 @@ def crawl_heimao(keyword, max_pages, fetch_detail=True, managed_session=False):
                         float(h.get('page_wait_max', 5)),
                     ))
 
-                html = main_page.content()
-                if len(html) < int(h.get('min_html_len', 1000)):
-                    log('页面过短', 'WARN')
-                    continue
+                page_too_short = False
+                parse_attempts = 1
+                if es.get('enabled') and p == 1 and es.get('protect_first_page'):
+                    parse_attempts = 1 + int(es.get('empty_page_retry', 1))
 
-                if fetch_detail:
-                    sid_new = extract_heimao_sid(main_page, ctx)
-                    if sid_new:
-                        S.heimao_sid = sid_new
-                    elif heimao_listing_has_sid_in_links(html):
-                        for href, _raw in re.findall(h['link_regex'], html, re.DOTALL):
-                            u = href
-                            if u.startswith('//'):
-                                u = 'https:' + u
-                            elif u.startswith('/'):
-                                u = 'https://tousu.sina.com.cn' + u
+                new_count = 0
+                for attempt in range(parse_attempts):
+                    if attempt > 0:
+                        log('第 1 页无结果，重试搜索 (%d/%d)…' % (attempt, parse_attempts - 1))
+                        html = _redo_heimao_search()
+                        if not html:
+                            html = main_page.content()
+                    else:
+                        html = main_page.content()
+
+                    if len(html) < int(h.get('min_html_len', 1000)):
+                        log('页面过短', 'WARN')
+                        page_too_short = True
+                        new_count = 0
+                        break
+
+                    if fetch_detail:
+                        sid_new = extract_heimao_sid(main_page, ctx)
+                        if sid_new:
+                            S.heimao_sid = sid_new
+                        elif heimao_listing_has_sid_in_links(html):
+                            for href, _raw in re.findall(h['link_regex'], html, re.DOTALL):
+                                u = href
+                                if u.startswith('//'):
+                                    u = 'https:' + u
+                                elif u.startswith('/'):
+                                    u = 'https://tousu.sina.com.cn' + u
+                                qs = parse_qs(urlparse(u).query)
+                                if qs.get('sid') and qs['sid'][0]:
+                                    S.heimao_sid = qs['sid'][0]
+                                    break
+
+                    a_tags = re.findall(h['link_regex'], html, re.DOTALL)
+                    new_count = 0
+                    min_text = int(h.get('min_link_text_len', 15))
+                    preview_len = int(h.get('list_title_preview_len', 40))
+
+                    for href, raw_text in a_tags:
+                        if href in seen:
+                            continue
+                        seen.add(href)
+                        text = re.sub(r'<[^>]+>', '', raw_text).strip()
+                        if len(text) < min_text:
+                            continue
+
+                        r = parse_heimao_link(text, href)
+                        r['page'] = p
+                        if fetch_detail and r.get('link') and not S.heimao_sid:
+                            u = r['link']
                             qs = parse_qs(urlparse(u).query)
                             if qs.get('sid') and qs['sid'][0]:
                                 S.heimao_sid = qs['sid'][0]
-                                break
 
-                a_tags = re.findall(h['link_regex'], html, re.DOTALL)
-                new_count = 0
-                min_text = int(h.get('min_link_text_len', 15))
-                preview_len = int(h.get('list_title_preview_len', 40))
-
-                for href, raw_text in a_tags:
-                    if href in seen:
-                        continue
-                    seen.add(href)
-                    text = re.sub(r'<[^>]+>', '', raw_text).strip()
-                    if len(text) < min_text:
-                        continue
-
-                    r = parse_heimao_link(text, href)
-                    r['page'] = p
-                    if fetch_detail and r.get('link') and not S.heimao_sid:
-                        u = r['link']
-                        qs = parse_qs(urlparse(u).query)
-                        if qs.get('sid') and qs['sid'][0]:
-                            S.heimao_sid = qs['sid'][0]
-
-                    if fetch_detail and r.get('link'):
-                        sid = S.heimao_sid or extract_heimao_sid(main_page, ctx)
-                        detail_link = ensure_heimao_detail_url(r['link'], sid)
-                        if 'complaint/view' in detail_link and sid and 'sid=' not in detail_link:
-                            log('  跳过详情: 无法附加 sid', 'WARN')
-                            continue
-                        if sid and 'sid=' in detail_link:
-                            S.heimao_sid = sid
-                        try:
-                            log('  详情: %s' % detail_link[-36:])
-                            detail_page = ctx.new_page()
-                            detail_page.goto(detail_link, timeout=timeout, wait_until='domcontentloaded')
-                            time.sleep(random.uniform(
-                                float(h.get('detail_wait_min', 5)),
-                                float(h.get('detail_wait_max', 8)),
-                            ))
-                            detail = detail_page.evaluate(js_detail.replace(chr(13), ''))
-                            if is_heimao_detail_auth_failure(detail_page, detail):
-                                detail_page.close()
-                                log('  详情页未登录或内容为空，等待登录后重试…', 'WARN')
-                                if not wait_for_site_login(ctx, main_page, 'heimao', S):
-                                    S.running = False
-                                    break
+                        if fetch_detail and r.get('link'):
+                            sid = S.heimao_sid or extract_heimao_sid(main_page, ctx)
+                            detail_link = ensure_heimao_detail_url(r['link'], sid)
+                            if 'complaint/view' in detail_link and sid and 'sid=' not in detail_link:
+                                log('  跳过详情: 无法附加 sid', 'WARN')
+                                continue
+                            if sid and 'sid=' in detail_link:
+                                S.heimao_sid = sid
+                            try:
+                                log('  详情: %s' % detail_link[-36:])
                                 detail_page = ctx.new_page()
-                                sid = S.heimao_sid or extract_heimao_sid(main_page, ctx)
-                                detail_link = ensure_heimao_detail_url(r['link'], sid)
                                 detail_page.goto(detail_link, timeout=timeout, wait_until='domcontentloaded')
                                 time.sleep(random.uniform(
                                     float(h.get('detail_wait_min', 5)),
                                     float(h.get('detail_wait_max', 8)),
                                 ))
                                 detail = detail_page.evaluate(js_detail.replace(chr(13), ''))
-                            for k in ['title', 'content', 'demand', 'merchant', 'problem', 'amount', 'reply', 'author', 'time', 'status', 'comments']:
-                                if detail.get(k):
-                                    r[k] = detail[k]
-                            log('  -> %s' % (
-                                r['title'][:preview_len]
-                                if r.get('title') and len(r['title']) > 5
-                                else r.get('problem') or r.get('merchant')
-                            ))
-                            detail_page.close()
-                        except Exception as e:
-                            log('  详情错误: %s' % str(e)[:60], 'ERROR')
-                            try:
-                                for pg in ctx.pages:
-                                    if pg != main_page:
-                                        pg.close()
-                            except Exception:
-                                pass
+                                if is_heimao_detail_auth_failure(detail_page, detail):
+                                    detail_page.close()
+                                    log('  详情页未登录或内容为空，等待登录后重试…', 'WARN')
+                                    if not wait_for_site_login(ctx, main_page, 'heimao', S):
+                                        S.running = False
+                                        break
+                                    detail_page = ctx.new_page()
+                                    sid = S.heimao_sid or extract_heimao_sid(main_page, ctx)
+                                    detail_link = ensure_heimao_detail_url(r['link'], sid)
+                                    detail_page.goto(detail_link, timeout=timeout, wait_until='domcontentloaded')
+                                    time.sleep(random.uniform(
+                                        float(h.get('detail_wait_min', 5)),
+                                        float(h.get('detail_wait_max', 8)),
+                                    ))
+                                    detail = detail_page.evaluate(js_detail.replace(chr(13), ''))
+                                for k in ['title', 'content', 'demand', 'merchant', 'problem', 'amount', 'reply', 'author', 'time', 'status', 'comments']:
+                                    if detail.get(k):
+                                        r[k] = detail[k]
+                                log('  -> %s' % (
+                                    r['title'][:preview_len]
+                                    if r.get('title') and len(r['title']) > 5
+                                    else r.get('problem') or r.get('merchant')
+                                ))
+                                detail_page.close()
+                            except Exception as e:
+                                log('  详情错误: %s' % str(e)[:60], 'ERROR')
+                                try:
+                                    for pg in ctx.pages:
+                                        if pg != main_page:
+                                            pg.close()
+                                except Exception:
+                                    pass
 
-                    sr = structure_heimao_record(r, len(results) + 1)
-                    r['structured'] = sr
-                    results.append(r)
-                    new_count += 1
-                    if not fetch_detail:
-                        log('黑猫: %s %s' % (
-                            r['time'][:10] if r.get('time') else '',
-                            (r.get('title') or '')[:preview_len],
-                        ))
+                        sr = structure_heimao_record(r, len(results) + 1)
+                        r['structured'] = sr
+                        results.append(r)
+                        new_count += 1
+                        if not fetch_detail:
+                            log('黑猫: %s %s' % (
+                                r['time'][:10] if r.get('time') else '',
+                                (r.get('title') or '')[:preview_len],
+                            ))
+
+                    if new_count > 0 or attempt >= parse_attempts - 1:
+                        break
+
+                if not S.running:
+                    break
 
                 log('本页: %d (累计: %d)' % (new_count, len(results)))
-                if new_count == 0 and p > 1:
+                if page_too_short:
+                    continue
+
+                stop, reason, consecutive_empty = heimao_should_stop_after_page(
+                    es, p, max_pages, new_count, consecutive_empty, page_too_short=False,
+                )
+                if stop and reason:
+                    log(format_early_stop_log('heimao', reason, p, max_pages))
                     break
             except Exception as e:
                 log('页面错误: %s' % str(e)[:100], 'ERROR')
@@ -462,6 +506,78 @@ def crawl_heimao(keyword, max_pages, fetch_detail=True, managed_session=False):
                 S.heimao_sid = ''
             close_cdp()
     return results
+
+
+def fetch_heimao_details_by_urls(urls, managed_session=True, log_fn=None):
+    """勘察阶段：按 URL 列表抓取黑猫详情。"""
+    h = _c()['heimao']
+    results = []
+    if not urls:
+        return results
+    timeout = int(h.get('page_timeout_ms', 30000))
+    js_detail = build_heimao_detail_js()
+
+    def _log(msg, level='INFO'):
+        if log_fn:
+            log_fn(msg, level)
+        else:
+            log(msg, level)
+
+    try:
+        if not prepare_browser_for_crawl():
+            _log('Chrome 未就绪', 'ERROR')
+            return results
+        ctx = connect_cdp()
+        main_page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        if not ensure_login_for_detail(ctx, main_page, 'heimao', True, S):
+            _log('黑猫登录未完成', 'ERROR')
+            return results
+        for url in urls:
+            if not S.running:
+                break
+            if not url:
+                continue
+            sid = S.heimao_sid or extract_heimao_sid(main_page, ctx)
+            detail_link = ensure_heimao_detail_url(url, sid)
+            r = {'link': url, 'source': h.get('source_name', '黑猫投诉')}
+            try:
+                detail_page = ctx.new_page()
+                detail_page.goto(detail_link, timeout=timeout, wait_until='domcontentloaded')
+                time.sleep(random.uniform(
+                    float(h.get('detail_wait_min', 5)),
+                    float(h.get('detail_wait_max', 8)),
+                ))
+                detail = detail_page.evaluate(js_detail.replace(chr(13), ''))
+                if is_heimao_detail_auth_failure(detail_page, detail):
+                    detail_page.close()
+                    if not wait_for_site_login(ctx, main_page, 'heimao', S):
+                        break
+                    detail_page = ctx.new_page()
+                    detail_page.goto(detail_link, timeout=timeout, wait_until='domcontentloaded')
+                    time.sleep(random.uniform(
+                        float(h.get('detail_wait_min', 5)),
+                        float(h.get('detail_wait_max', 8)),
+                    ))
+                    detail = detail_page.evaluate(js_detail.replace(chr(13), ''))
+                for k in ['title', 'content', 'demand', 'merchant', 'problem', 'amount', 'reply', 'author', 'time', 'status', 'comments']:
+                    if detail.get(k):
+                        r[k] = detail[k]
+                detail_page.close()
+                sr = structure_heimao_record(r, len(results) + 1)
+                r['structured'] = sr
+                results.append(r)
+            except Exception as e:
+                _log('详情错误 %s: %s' % (url[-24:], str(e)[:60]), 'ERROR')
+                try:
+                    for pg in ctx.pages:
+                        if pg != main_page:
+                            pg.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        _log('fetch_heimao_details 异常: %s' % str(e)[:80], 'ERROR')
+    return results
+
 
 def parse_heimao_link(text, href):
     h = _c()['heimao']
@@ -493,7 +609,7 @@ def parse_heimao_link(text, href):
     r['title'] = r['content'][:title_max]
     return r
 
-def crawl_xhs(keyword, max_pages, fetch_detail=True, managed_session=False):
+def crawl_xhs(keyword, max_pages, fetch_detail=True, managed_session=False, timeout_check=None):
     x = _c()['xhs']
     if not managed_session:
         S.running = True
@@ -525,9 +641,15 @@ def crawl_xhs(keyword, max_pages, fetch_detail=True, managed_session=False):
             log('小红书登录未完成，爬取已取消', 'ERROR')
             return results
 
+        es = early_stop_cfg('xhs', x)
+        xhs_stop_state = {'saturation_rounds': 0, 'prev_item_count': 0}
+
         for p in range(1, max_pages + 1):
             if not S.running:
                 log('已停止', 'WARN')
+                break
+            if timeout_check and timeout_check():
+                log('监测任务超时，停止小红书爬取', 'WARN')
                 break
             log('XHS第 %d/%d 页' % (p, max_pages))
             try:
@@ -536,8 +658,15 @@ def crawl_xhs(keyword, max_pages, fetch_detail=True, managed_session=False):
                     time.sleep(float(x.get('scroll_wait_seconds', 2)))
 
                 items = page.query_selector_all(x['note_item_selector'])
-                log('找到 %d 个note-item' % len(items))
+                item_count = len(items)
+                log('找到 %d 个note-item' % item_count)
 
+                stop, reason = xhs_should_stop_end_marker(es, p, max_pages, page, item_count)
+                if stop and reason:
+                    log(format_early_stop_log('xhs', reason, p, max_pages))
+                    break
+
+                before_len = len(results)
                 for item in items:
                     try:
                         le = item.query_selector(x['link_selector'])
@@ -597,7 +726,14 @@ def crawl_xhs(keyword, max_pages, fetch_detail=True, managed_session=False):
                     except Exception:
                         pass
 
-                log('累计: %d' % len(results))
+                new_count = len(results) - before_len
+                log('累计: %d (本轮 +%d)' % (len(results), new_count))
+                stop, reason = xhs_update_saturation(
+                    es, xhs_stop_state, p, max_pages, new_count, item_count,
+                )
+                if stop and reason:
+                    log(format_early_stop_log('xhs', reason, p, max_pages))
+                    break
             except Exception as e:
                 log('错误: %s' % str(e)[:100], 'ERROR')
                 time.sleep(3)
@@ -623,6 +759,175 @@ def crawl_xhs(keyword, max_pages, fetch_detail=True, managed_session=False):
                 S.login_wait = None
             close_cdp()
     return results
+
+
+def _investigation_detail_cfg(x):
+    inv = dict(x.get('investigation_detail') or {})
+    inv.setdefault('dom_miss_skip', True)
+    inv.setdefault('dom_miss_research_threshold', 3)
+    inv.setdefault('research_max_scroll_rounds', 2)
+    inv.setdefault('between_detail_min', x.get('detail_wait_min', 4))
+    inv.setdefault('between_detail_max', x.get('detail_wait_max', 7))
+    return inv
+
+
+def _normalize_investigation_items(urls_or_items):
+    items = []
+    for entry in urls_or_items or []:
+        if isinstance(entry, dict):
+            url = (entry.get('url') or entry.get('link') or '').strip()
+            kw = (entry.get('keyword') or entry.get('_search_keyword') or '').strip()
+            items.append({'url': url, 'keyword': kw})
+        elif entry:
+            items.append({'url': str(entry).strip(), 'keyword': ''})
+    return [it for it in items if it['url']]
+
+
+def _group_investigation_by_keyword(items):
+    groups = {}
+    order = []
+    for it in items:
+        kw = it.get('keyword') or ''
+        if kw not in groups:
+            groups[kw] = []
+            order.append(kw)
+        groups[kw].append(it)
+    return order, groups
+
+
+def fetch_xhs_details_by_urls(urls_or_items, managed_session=True, log_fn=None):
+    """勘察阶段：在搜索页弹窗抓取小红书详情（禁止 goto explore）。"""
+    x = _c()['xhs']
+    inv = _investigation_detail_cfg(x)
+    items = _normalize_investigation_items(urls_or_items)
+    results = []
+    if not items:
+        return results
+    timeout = int(x.get('page_timeout_ms', 30000))
+    after_wait = float(x.get('after_goto_wait', 5))
+    source_name = x.get('source_name', '小红书')
+
+    def _log(msg, level='INFO'):
+        if log_fn:
+            log_fn(msg, level)
+        else:
+            log(msg, level)
+
+    def _result(url, ok=False, error='', detail=None):
+        r = {'link': url, 'source': source_name, 'ok': ok}
+        if error:
+            r['error'] = error
+        if detail:
+            r.update(detail)
+        return r
+
+    def _ensure_search_page(ctx, page, keyword):
+        if not keyword:
+            return False, 'missing_keyword'
+        search_url = x['search_url_template'].format(keyword=keyword)
+        cur = page.url or ''
+        if keyword not in cur or 'search_result' not in cur:
+            page.goto(search_url, timeout=timeout, wait_until='domcontentloaded')
+            time.sleep(after_wait)
+        if not xhs_wait_if_search_blocked(ctx, page, S, search_url, timeout, after_wait):
+            return False, 'login_required'
+        return True, ''
+
+    def _research_search(ctx, page, keyword):
+        _log('investigation: xhs 重搜 keyword=%s' % keyword, 'WARN')
+        ok, err = _ensure_search_page(ctx, page, keyword)
+        if not ok:
+            return False, err or 'search_failed'
+        rounds = int(inv.get('research_max_scroll_rounds', 2))
+        scroll_px = int(x.get('scroll_pixels', 1500))
+        scroll_wait = float(x.get('scroll_wait_seconds', 2))
+        for _ in range(rounds):
+            try:
+                page.evaluate('window.scrollBy(0, %d)' % scroll_px)
+            except Exception:
+                pass
+            time.sleep(scroll_wait)
+        return True, ''
+
+    def _locate_item(page, url, note_id):
+        item, reason = find_note_item_for_url(page, url, note_id)
+        if item:
+            return item, ''
+        scroll_rounds = int(x.get('scroll_times_per_page', 3))
+        return scroll_search_for_note(page, note_id, scroll_rounds)
+
+    try:
+        if not prepare_browser_for_crawl():
+            _log('Chrome 未就绪', 'ERROR')
+            return results
+        ctx = connect_cdp()
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        if not ensure_login_for_detail(ctx, page, 'xhs', True, S):
+            _log('小红书登录未完成', 'ERROR')
+            return results
+
+        kw_order, groups = _group_investigation_by_keyword(items)
+        for kw in kw_order:
+            batch = groups[kw]
+            if not S.running:
+                break
+            if kw:
+                ok, err = _ensure_search_page(ctx, page, kw)
+                if not ok:
+                    for it in batch:
+                        results.append(_result(it['url'], ok=False, error=err or 'search_failed'))
+                    continue
+            dom_miss = 0
+            for it in batch:
+                if not S.running:
+                    break
+                url = it['url']
+                note_id = parse_xhs_note_id(url)
+                if not kw:
+                    _log('investigation: 无 keyword，无法定位 %s' % url[-28:], 'WARN')
+                    results.append(_result(url, ok=False, error='missing_keyword'))
+                    continue
+
+                item, reason = _locate_item(page, url, note_id)
+                if not item:
+                    dom_miss += 1
+                    threshold = int(inv.get('dom_miss_research_threshold', 3))
+                    if dom_miss >= threshold:
+                        _research_search(ctx, page, kw)
+                        dom_miss = 0
+                        item, reason = _locate_item(page, url, note_id)
+
+                if not item:
+                    _log('investigation: dom_not_found %s' % url[-28:], 'WARN')
+                    results.append(_result(url, ok=False, error='dom_not_found'))
+                    continue
+
+                _log('  XHS勘察详情(弹窗): %s' % url[-28:])
+                detail, err = fetch_xhs_detail_via_modal(page, item, url, _log)
+                if err and is_xhs_detail_auth_failure(page, detail or {}):
+                    _log('  详情未登录或内容为空，等待登录后重试…', 'WARN')
+                    if not wait_for_site_login(ctx, page, 'xhs', S):
+                        results.append(_result(url, ok=False, error='login_required'))
+                        break
+                    item, reason = _locate_item(page, url, note_id)
+                    if not item:
+                        results.append(_result(url, ok=False, error='dom_not_found'))
+                        continue
+                    detail, err = fetch_xhs_detail_via_modal(page, item, url, _log)
+
+                if err:
+                    results.append(_result(url, ok=False, error=err[:80]))
+                else:
+                    results.append(_result(url, ok=True, detail=detail))
+
+                time.sleep(random.uniform(
+                    float(inv.get('between_detail_min', 4)),
+                    float(inv.get('between_detail_max', 7)),
+                ))
+    except Exception as e:
+        _log('fetch_xhs_details 异常: %s' % str(e)[:80], 'ERROR')
+    return results
+
 
 @app.route('/')
 def index_page():
