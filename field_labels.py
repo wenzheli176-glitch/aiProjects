@@ -56,6 +56,9 @@ FIELD_LABELS = {
     'investigation_detail.research_max_scroll_rounds': _entry('重搜滚动轮数', 'crawl', 'number'),
     'investigation_detail.between_detail_min': _entry('详情间隔最小秒', 'crawl', 'number'),
     'investigation_detail.between_detail_max': _entry('详情间隔最大秒', 'crawl', 'number'),
+    'investigation_detail.max_modal_per_run': _entry(
+        '单次 Run 弹窗上限', 'crawl', 'number', '0 表示不限制；多 Worker 共享',
+    ),
     # --- normalize ---
     'include_reply_in_body': _entry('正文含回复', 'normalize', 'checkbox'),
     'include_merchant_in_body': _entry('正文含商户', 'normalize', 'checkbox'),
@@ -110,7 +113,8 @@ FIELD_LABELS = {
     'url': _entry('链接', 'intel'),
     # --- monitor ---
     'task_timeout_sec': _entry('任务超时', 'monitor', 'number', '秒'),
-    'analysis_timeout_sec': _entry('分析预留超时', 'monitor', 'number', '爬取完成后 AI 分析预算（秒）'),
+    'analysis_timeout_sec': _entry('分析预留超时', 'monitor', 'number', '从总时长预留的 AI 分析预算（秒）；过大将压缩爬取时间'),
+    'min_crawl_timeout_sec': _entry('爬取保底超时', 'monitor', 'number', '爬取阶段最少 wall-clock 秒数（秒）'),
     'default_sources': _entry('默认来源', 'monitor'),
     'scheduler_enabled': _entry('启用调度器', 'monitor', 'boolean'),
     'scheduler_timezone': _entry('调度时区', 'monitor'),
@@ -140,6 +144,8 @@ FIELD_LABELS = {
     'investigation_queued': _entry('勘察排队', 'monitor_run', 'number', '已入勘察队列条数'),
     'investigation_done': _entry('勘察完成', 'monitor_run', 'number', '勘察成功条数'),
     'investigation_failed': _entry('勘察失败', 'monitor_run', 'number', '勘察失败条数'),
+    'investigation_modal_done': _entry('弹窗完成', 'monitor_run', 'number', 'xhs 弹窗成功次数（Run 级）'),
+    'investigation_skipped_quota': _entry('配额跳过', 'monitor_run', 'number', 'xhs 弹窗配额超限跳过条数'),
     'crawl_ms': _entry('爬取耗时', 'monitor_run', 'number', '该 source 爬取 wall time（毫秒）'),
     'analyze_ms': _entry('分析耗时', 'monitor_run', 'number', '该 source 分摊的分析 wall time（毫秒）'),
     'prompt_tokens': _entry('Prompt Tokens', 'monitor_run', 'number', '输入 token 数'),

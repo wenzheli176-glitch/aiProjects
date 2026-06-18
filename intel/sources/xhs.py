@@ -120,6 +120,9 @@ class XhsCrawlAdapter:
         items = options.get('items')
         if not items:
             items = [{'url': u, 'keyword': ''} for u in (urls or []) if u]
-        return fetch_xhs_details_by_urls(items, managed_session=True, log_fn=crawl_ctx.get('log'))
+        return fetch_xhs_details_by_urls(
+            items, managed_session=True, log_fn=crawl_ctx.get('log'),
+            run_id=crawl_ctx.get('run_id'),
+        )
 
 

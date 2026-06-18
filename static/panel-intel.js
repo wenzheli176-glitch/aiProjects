@@ -104,6 +104,7 @@ const RUN_GLOSSARY_GROUPS = [
       'raw_new', 'raw_updated', 'raw_unchanged', 'intel_written', 'intel_replaced', 'intel_skipped',
       'triage_high', 'triage_medium', 'triage_noise', 'needs_investigation_count',
       'investigation_queued', 'investigation_done', 'investigation_failed',
+      'investigation_modal_done', 'investigation_skipped_quota',
     ],
   },
   {
@@ -116,6 +117,7 @@ const RUN_STATS_KEYS = [
   'raw_new', 'raw_updated', 'raw_unchanged', 'intel_written', 'intel_replaced', 'intel_skipped',
   'triage_high', 'triage_medium', 'triage_noise', 'needs_investigation_count',
   'investigation_queued', 'investigation_done', 'investigation_failed',
+  'investigation_modal_done', 'investigation_skipped_quota',
 ];
 
 async function api(path, opts = {}) {
@@ -178,26 +180,6 @@ function partnerNames(ids) {
   return (ids || []).map(id => partnerName(id)).join('、') || '-';
 }
 
-function initTabs() {
-  document.querySelectorAll('.tab').forEach(tab => {
-    tab.addEventListener('click', () => {
-      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-      document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-      tab.classList.add('active');
-      document.getElementById('panel-' + tab.dataset.panel).classList.add('active');
-      stopAiLogPoll();
-      if (tab.dataset.panel === 'partners') loadPartners();
-      if (tab.dataset.panel === 'tasks') loadTasks();
-      if (tab.dataset.panel === 'analysis') {
-        loadAnalysisConfig();
-        refreshAiLogTaskSelect();
-        loadAnalysisLogs();
-        startAiLogPoll();
-      }
-    });
-  });
-}
-
 async function loadSources() {
   const d = await api('/api/sources');
   sources = d.sources || [];
@@ -217,6 +199,31 @@ function renderSourceChecks(selectedIds) {
   srcBox.innerHTML = sources.map(s =>
     `<label><input type="checkbox" name="taskSource" value="${esc(s.source_id)}" ${selected.includes(s.source_id) ? 'checked' : ''}> ${esc(s.label)}</label>`
   ).join('');
+  srcBox.querySelectorAll('input').forEach(el => {
+    el.addEventListener('change', syncCrawlModeFieldVisibility);
+  });
+  syncCrawlModeFieldVisibility();
+}
+
+function syncCrawlModeFieldVisibility() {
+  const field = document.getElementById('tCrawlModeField');
+  const note = document.getElementById('tCrawlModeNote');
+  if (!field || !note) return;
+  const sourcesSel = getSelectedSourceIds();
+  const hasXhs = sourcesSel.includes('xhs');
+  const heimaoOnly = sourcesSel.length === 1 && sourcesSel[0] === 'heimao';
+  if (hasXhs) {
+    field.style.display = 'none';
+    note.textContent = sourcesSel.length > 1
+      ? '混合源：黑猫 legacy（可勾选详情），小红书固定 list_first（routine 无详情，勘察弹窗）。'
+      : '小红书固定 list_first：常规仅列表，详情在勘察阶段弹窗。';
+  } else if (heimaoOnly) {
+    field.style.display = '';
+    note.textContent = '仅黑猫单源时，上方选项作为 crawl_mode fallback；多源混合请使用数据源管理中的源级配置。';
+  } else {
+    field.style.display = 'none';
+    note.textContent = '请选择数据来源；爬取策略由数据源配置决定。';
+  }
 }
 
 function renderPartnerChecks(selectedIds) {
@@ -731,7 +738,7 @@ function renderTaskTable() {
       + '<td class="cell-stack">' + formatLastRun(t) + '</td>'
       + '<td class="cell-stack">' + fmtTime(t.created_at) + '</td>'
       + '<td class="actions actions-wrap col-actions">'
-      + '<button class="btn btn-primary btn-sm" onclick="runTaskById(' + t.id + ')" ' + (!t.can_run ? 'disabled' : '') + ' title="增量爬取+分析">执行</button>'
+      + '<button class="btn btn-primary btn-sm" onclick="runTaskById(' + t.id + ')" ' + (!t.can_run ? 'disabled' : '') + ' title="' + esc(t.run_block_reason || '增量爬取+分析') + '">执行</button>'
       + '<button class="btn btn-orange btn-sm" onclick="reanalyzeIncremental(' + t.id + ')" ' + (!t.can_reanalyze ? 'disabled' : '') + ' title="仅分析新增/更新的 raw">增量AI</button>'
       + '<button class="btn btn-orange btn-sm" onclick="reanalyzeFull(' + t.id + ')" ' + (!t.can_reanalyze ? 'disabled' : '') + ' title="清除情报后全量重分析">全量AI</button>'
       + '<button class="btn btn-gray btn-sm" onclick="toggleRunHistory(' + t.id + ')">' + (expandedRunHistoryTaskId === t.id ? '收起' : '历史') + '</button>'

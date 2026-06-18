@@ -34,8 +34,13 @@
         <span id="login-wait-detail"></span>
         — 请在已打开的 Chrome 窗口完成登录，成功后任务将自动继续（勿关闭 Chrome）。
     </div>
+    <div class="login-wait-banner" id="cookie-diagnose-banner" style="background:#450a0a;border-color:#ef4444;color:#fecaca;display:none">
+        <strong id="cookie-diagnose-title">Cookie 诊断异常</strong>
+        <span id="cookie-diagnose-detail"></span>
+        — 请前往 <a href="/?tab=cookies" style="color:#fca5a5;text-decoration:underline">Cookie 实例</a> 更新凭证并重新诊断。
+    </div>
 <div class="app-shell">
-  <nav class="app-nav"><a href="#" data-tab="home">首页看板</a><a href="#" data-tab="intel">情报中心</a><a href="#" data-tab="raw">源数据</a><a href="#" data-tab="partners">合作方</a><a href="#" data-tab="tasks">监测任务</a><a href="#" data-tab="sources">数据源</a><a href="#" data-tab="crawl">采集调试</a><a href="#" data-tab="system">系统设置</a><a href="#" data-tab="analysis">大模型</a></nav>
+  <nav class="app-nav"><a href="#" data-tab="home">首页看板</a><a href="#" data-tab="intel">情报中心</a><a href="#" data-tab="raw">源数据</a><a href="#" data-tab="partners">合作方</a><a href="#" data-tab="tasks">监测任务</a><a href="#" data-tab="sources">数据源</a><a href="#" data-tab="cookies">Cookie 实例</a><a href="#" data-tab="crawl">采集调试</a><a href="#" data-tab="system">系统设置</a><a href="#" data-tab="analysis">大模型</a></nav>
   <main class="app-main">
     <div id="panel-home" class="app-panel active">
       <div class="card">
@@ -227,6 +232,23 @@
       </div>
     </div>
     </div>
+    <div id="panel-cookies" class="app-panel">
+      <div class="card">
+        <h2>Cookie 实例（Worker）</h2>
+        <p class="config-hint">按 Worker 实例管理 Cookie 文件；与监测 Run 前 diagnose 使用同一路径。上传与诊断需管理员权限。</p>
+        <div class="btn-group" style="margin-bottom:12px">
+          <button class="btn btn-gray btn-sm" onclick="loadCookieInstances()">刷新</button>
+        </div>
+        <div class="scroll-sm">
+          <table>
+            <thead><tr>
+              <th>数据源</th><th>实例</th><th>CDP</th><th>Cookie 文件</th><th>条数</th><th>诊断</th><th>操作</th>
+            </tr></thead>
+            <tbody id="cookieInstancesBody"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
     <div id="panel-crawl" class="app-panel">
     <div class="controls">
         <div class="card">
@@ -253,7 +275,7 @@
                 <button class="btn btn-gray btn-sm" onclick="exportData('xhs','csv')">CSV</button>
                 <button class="btn btn-gray btn-sm" onclick="exportData('xhs','json')">JSON</button>
             </div>
-            <p class="config-hint" style="margin-top:8px">登录辅助见「系统设置 → 登录凭证」</p>
+            <p class="config-hint" style="margin-top:8px">登录辅助见「系统设置 → 登录凭证」（手工爬取）；监测 Worker Cookie 见「Cookie 实例」</p>
         </div>
     </div>
     <div class="card">
@@ -292,12 +314,18 @@
                 <div class="field"><label>Web 监听地址</label><input id="cfg-server-host" type="text"></div>
                 <div class="field"><label>Web 端口</label><input id="cfg-server-port" type="number" min="1" max="65535"></div>
                 <div class="field"><label>Chrome 路径</label><input id="cfg-chrome-exe" type="text"></div>
-                <div class="field"><label>CDP 调试端口</label><input id="cfg-chrome-port" type="number" min="1024" max="65535"></div>
-                <div class="field"><label>Chrome 用户目录</label><input id="cfg-chrome-profile" type="text"><span class="config-hint">相对路径基于项目目录</span></div>
+                <div class="field"><label>CDP 调试端口（手工爬取）</label><input id="cfg-chrome-port" type="number" min="1024" max="65535"></div>
+                <div class="field"><label>Chrome 用户目录（手工爬取）</label><input id="cfg-chrome-profile" type="text"><span class="config-hint">相对路径基于项目目录</span></div>
                 <div class="field"><label>Chrome 启动页 URL</label><input id="cfg-chrome-startup" type="text"></div>
                 <div class="field"><label>导出目录</label><input id="cfg-output-dir" type="text" placeholder="留空=项目目录"></div>
                 <div class="field"><label>日志保留条数</label><input id="cfg-max-logs" type="number" min="50" max="2000"></div>
             </div>
+            <div class="field-row" style="margin-top:12px">
+                <label class="toggle"><input type="checkbox" id="cfg-workers-enabled"><span class="slider"></span></label>
+                <span class="toggle-label">启用多进程 Worker（监测 Run：heimao ∥ xhs 并行）</span>
+            </div>
+            <p id="cfg-workers-summary" class="config-hint" style="margin-top:8px"></p>
+            <p class="config-hint">Worker 实例端口、Profile、Cookie 文件在 <code>config.json → monitor.workers</code> 配置；Cookie 上传与诊断见 <a href="/?tab=cookies" style="color:#3b82f6">Cookie 实例</a> Tab。修改 instances 可用下方「JSON 高级」。</p>
         </div>
 
         <div class="config-section" id="cfg-heimao">
@@ -333,7 +361,7 @@
         </div>
 
         <div class="config-section" id="cfg-auth">
-            <p class="config-hint" style="margin-bottom:12px">获取方法见 <a href="/docs/credentials" target="_blank" style="color:#3b82f6">如何获取登录凭证</a></p>
+            <p class="config-hint" style="margin-bottom:12px">用于<strong>采集调试</strong> Tab 的手工爬取登录辅助。监测 Run 的 Worker Cookie 请用 <a href="/?tab=cookies" style="color:#3b82f6">Cookie 实例</a>。获取方法见 <a href="/docs/credentials" target="_blank" style="color:#3b82f6">如何获取登录凭证</a></p>
             <div class="field-grid">
                 <div class="field"><label>黑猫 Cookie 文件路径</label><input id="cfg-auth-h-file" type="text"></div>
                 <div class="field"><label>小红书 Cookie 文件路径</label><input id="cfg-auth-x-file" type="text"></div>
@@ -376,7 +404,7 @@
                 <button class="btn btn-gray btn-sm" onclick="authDiagnose('heimao')">黑猫：登录诊断</button>
                 <button class="btn btn-gray btn-sm" onclick="authDiagnose('xhs')">小红书：登录诊断</button>
             </div>
-            <p class="config-hint" id="auth-status-text" style="margin-top:8px"></p>
+            <p class="config-hint" id="cfg-auth-status" style="margin-top:8px"></p>
         </div>
 
         <div class="config-section" id="cfg-export">
@@ -385,38 +413,6 @@
                 <div class="field"><label>导出内容最大长度</label><input id="cfg-ex-content-max" type="number"></div>
                 <div class="field"><label>导出回复最大长度</label><input id="cfg-ex-reply-max" type="number"></div>
             </div>
-        </div>
-
-        <div class="config-section" id="cfg-ai">
-            <div class="field-grid">
-                <div class="field"><label>服务商</label><input id="cfg-ai-provider" type="text"></div>
-                <div class="field"><label>Prompt 版本标识</label><input id="cfg-ai-prompt-ver" type="text"></div>
-                <div class="field" style="grid-column:1/-1"><label>API Endpoint（国内）</label><input id="cfg-ai-endpoint" type="text"></div>
-                <div class="field" style="grid-column:1/-1"><label>API Endpoint（国际备用）</label><input id="cfg-ai-endpoint-intl" type="text"></div>
-                <div class="field"><label>模型名称</label><input id="cfg-ai-model" type="text"></div>
-                <div class="field"><label>环境变量名（API Key）</label><input id="cfg-ai-key-env" type="text"></div>
-                <div class="field" style="grid-column:1/-1"><label>API Key（可选）</label><input id="cfg-ai-key" type="password" autocomplete="off" placeholder="留空则使用环境变量；已配置时显示提示文案"></div>
-                <div class="field"><label>批大小</label><input id="cfg-ai-batch" type="number" min="1"></div>
-                <div class="field"><label>正文最大字符</label><input id="cfg-ai-body-max" type="number" min="100"></div>
-                <div class="field"><label>失败重试次数</label><input id="cfg-ai-retries" type="number" min="0"></div>
-                <div class="field"><label>重试间隔（秒）</label><input id="cfg-ai-retry-delay" type="number" step="0.5" min="0"></div>
-                <div class="field"><label>Temperature</label><input id="cfg-ai-temp" type="number" step="0.1" min="0" max="2"></div>
-                <div class="field"><label>请求超时（秒）</label><input id="cfg-ai-timeout" type="number" min="10"></div>
-                <div class="field"><label>Mock 默认相关度</label>
-                    <select id="cfg-ai-mock-rel"><option value="medium">medium</option><option value="high">high</option><option value="low">low</option></select>
-                </div>
-            </div>
-            <div class="field-row" style="margin-top:8px">
-                <label class="toggle"><input type="checkbox" id="cfg-ai-mock"><span class="slider"></span></label>
-                <span class="toggle-label">无 API Key 时使用 Mock 打标</span>
-            </div>
-            <div class="field" style="margin-top:12px"><label>扩展参数 extra_body（JSON，如 MiniMax reasoning_split）</label>
-                <textarea id="cfg-ai-extra-body" rows="3" placeholder='{"reasoning_split": true}'></textarea>
-            </div>
-            <div class="field" style="margin-top:12px"><label>自定义 System Prompt（留空用内置模板）</label>
-                <textarea id="cfg-ai-system-prompt" rows="8" placeholder="占位符: {partner_name} {aliases}"></textarea>
-            </div>
-            <p id="cfg-ai-status" class="config-hint" style="margin-top:8px"></p>
         </div>
 
         <div class="config-section" id="cfg-json">
@@ -471,7 +467,8 @@
   <div class="field"><label>合作方 *</label><div id="tPartnerChecks" class="partner-checks"><span class="muted">请先添加合作方</span></div></div>
   <div class="field"><label>数据来源</label><div id="tSourceChecks" class="source-checks"></div></div>
   <div class="field"><label>采集页数</label><input id="tPages" type="number" value="2" min="1"></div>
-  <div class="field"><label>爬取模式</label><select id="tCrawlMode"><option value="list_first" selected>列表优先（Stage2 共享池）</option><option value="legacy">Legacy（合作方×源逐条详情）</option></select><p class="muted" style="margin-top:6px;font-size:12px">列表优先：常规只抓列表摘要，高相关高风险增量信号在勘察阶段补详情。</p></div>
+  <div class="field" id="tCrawlModeField"><label>黑猫爬取模式（单源 fallback）</label><select id="tCrawlMode"><option value="list_first">列表优先</option><option value="legacy" selected>Legacy（合作方×源）</option></select></div>
+  <p id="tCrawlModeNote" class="muted" style="margin:6px 0 10px;font-size:12px">混合源任务：爬取策略由<strong>数据源配置</strong>决定（黑猫 legacy / 小红书 list_first）。仅当任务<strong>仅含黑猫</strong>时，上方选项作为 fallback。</p>
   <div class="field-row"><input type="checkbox" id="tFetchDetail"><label for="tFetchDetail" class="toggle-label">Legacy 模式抓取详情</label></div>
   <div class="field schedule-block">
     <div class="field-row"><input type="checkbox" id="tScheduleEnabled"><label for="tScheduleEnabled" class="toggle-label">启用定时执行（增量）</label></div>
@@ -497,6 +494,7 @@
 <script src="/static/panel-home.js"></script>
 <script src="/static/panel-raw.js"></script>
 <script src="/static/panel-intel.js"></script>
+<script src="/static/panel-cookies.js"></script>
 <script src="/static/panel-crawl.js"></script>
 <script src="/static/app-sources.js"></script>
 <script>window.api = App.api;</script>

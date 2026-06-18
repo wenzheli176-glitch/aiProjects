@@ -209,6 +209,7 @@ DEFAULT_CONFIG = {
             'research_max_scroll_rounds': 2,
             'between_detail_min': 4,
             'between_detail_max': 7,
+            'max_modal_per_run': 200,
         },
         'early_stop': {
             'enabled': True,
@@ -253,22 +254,52 @@ DEFAULT_CONFIG = {
         'heimao': {
             'enabled': True,
             'label': '黑猫投诉',
+            'crawl_mode': 'legacy',
+            'allowed_crawl_modes': ['legacy', 'list_first'],
         },
         'xhs': {
             'enabled': True,
             'label': '小红书',
+            'crawl_mode': 'list_first',
+            'allowed_crawl_modes': ['list_first'],
         },
     },
     'monitor': {
         'default_sources': ['heimao', 'xhs'],
         'default_max_pages': 2,
         'task_timeout_sec': 7200,
-        'analysis_timeout_sec': 7200,
+        'analysis_timeout_sec': 3600,
+        'min_crawl_timeout_sec': 1800,
         'scheduler_enabled': True,
         'scheduler_timezone': 'Asia/Shanghai',
         'crawl_mode': 'list_first',
         'industry_batch_max_keywords': 5,
         'priority_quota': {'P0': 0.5, 'P1': 0.3, 'P2': 0.2},
+        'run_state': {
+            'claim_timeout_sec': 600,
+            'heartbeat_interval_sec': 30,
+        },
+        'workers': {
+            'enabled': False,
+            'max_workers_total': 4,
+            'heimao': {
+                'instances': [{
+                    'instance_id': 'heimao-0',
+                    'cdp_port': 9222,
+                    'user_data_dir': 'chrome_heimao_profile',
+                    'cookies_file': 'credentials/heimao_cookies.json',
+                }],
+            },
+            'xhs': {
+                'max_instances': 1,
+                'instances': [{
+                    'instance_id': 'xhs-0',
+                    'cdp_port': 9230,
+                    'user_data_dir': 'chrome_profiles/xhs_0',
+                    'cookies_file': 'credentials/xhs_cookies.json',
+                }],
+            },
+        },
     },
     'analysis': {
         'provider': 'minimax',
@@ -280,6 +311,7 @@ DEFAULT_CONFIG = {
         'prompt_version': 'v1-high-recall-minimax-m3',
         'active_prompt_id': 'default-high-recall',
         'batch_size': 10,
+        'parallel_batches': 5,
         'max_body_chars': 2000,
         'max_retries': 2,
         'retry_delay_sec': 2,

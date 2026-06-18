@@ -51,6 +51,31 @@ def _xhs_session_fingerprint(cookies):
     return '|'.join(parts)
 
 
+def _persist_worker_login_wait(runtime):
+    """Worker 子进程：将 login_wait 写入 monitor_task_runs.worker_state_json。"""
+    run_id = getattr(runtime, 'worker_run_id', None)
+    instance_id = getattr(runtime, 'worker_instance_id', None)
+    if not run_id or not instance_id:
+        return
+    try:
+        from intel.db import update_run_worker_state
+        lw = None
+        with runtime.lock:
+            if runtime.login_wait:
+                lw = dict(runtime.login_wait)
+        source_id = getattr(runtime, 'worker_source_id', '') or ''
+        status = 'waiting_login' if lw else getattr(runtime, '_worker_status', 'running')
+        update_run_worker_state(run_id, {
+            instance_id: {
+                'source_id': source_id,
+                'status': status,
+                'login_wait': lw,
+            },
+        })
+    except Exception:
+        pass
+
+
 def _set_login_wait_ui(runtime, site, message):
     ac = _auth_cfg(site)
     with runtime.lock:
@@ -62,12 +87,14 @@ def _set_login_wait_ui(runtime, site, message):
             'message': message,
             'elapsed_sec': 0,
         }
+    _persist_worker_login_wait(runtime)
 
 
 def _clear_login_wait_ui(runtime):
     with runtime.lock:
         runtime.phase = ''
         runtime.login_wait = None
+    _persist_worker_login_wait(runtime)
 
 
 def check_site_logged_in(ctx, page, site, poll_only=False):
@@ -492,6 +519,9 @@ def wait_for_site_login(ctx, page, site, runtime):
             if runtime.login_wait:
                 runtime.login_wait['elapsed_sec'] = int(elapsed)
                 runtime.login_wait['message'] = '等待%s登录…' % label
+
+        if getattr(runtime, 'worker_run_id', None) and int(elapsed) % 5 == 0:
+            _persist_worker_login_wait(runtime)
 
         if elapsed >= timeout:
             runtime.log('[%s] 等待登录超时 (%d 秒)，任务中止' % (site, timeout), 'ERROR')

@@ -1,5 +1,17 @@
 # -*- coding: utf-8 -*-
 """各数据源 CrawlProfile / NormalizeProfile 可视化编辑白名单。"""
+from config import cfg
+
+SOURCE_CRAWL_DEFAULTS = {
+    'heimao': 'legacy',
+    'xhs': 'list_first',
+}
+
+SOURCE_ALLOWED_CRAWL_MODES = {
+    'heimao': ('legacy', 'list_first'),
+    'xhs': ('list_first',),
+}
+
 SOURCE_PROFILE_KEYS = {
     'heimao': [
         'source_name',
@@ -68,12 +80,27 @@ NORMALIZE_PROFILE_KEYS = {
 
 SOURCES_NOTICE = '新增数据源需在代码中注册 CrawlAdapter/NormalizeAdapter，无法仅靠配置添加。'
 
+INVESTIGATION_DETAIL_KEYS = (
+    'dom_miss_skip',
+    'dom_miss_research_threshold',
+    'research_max_scroll_rounds',
+    'between_detail_min',
+    'between_detail_max',
+    'max_modal_per_run',
+)
+
 
 def filter_profile_patch(source_id, data):
     allowed = SOURCE_PROFILE_KEYS.get(source_id) or []
     if not isinstance(data, dict):
         return {}
-    return {k: data[k] for k in allowed if k in data}
+    out = {k: data[k] for k in allowed if k in data}
+    if 'investigation_detail' in data and isinstance(data.get('investigation_detail'), dict):
+        inv = data['investigation_detail']
+        filtered = {k: inv[k] for k in INVESTIGATION_DETAIL_KEYS if k in inv}
+        if filtered:
+            out['investigation_detail'] = filtered
+    return out
 
 
 def filter_normalize_patch(source_id, data):
@@ -94,3 +121,39 @@ def extract_normalize_profile(source_id, config_node):
     node = config_node if isinstance(config_node, dict) else {}
     norm = node.get('normalize') if isinstance(node.get('normalize'), dict) else {}
     return {k: norm.get(k) for k in allowed if k in norm}
+
+
+def resolve_source_crawl_mode(source_id, task=None):
+    """源级 crawl_mode；xhs 强制 list_first。仅 heimao 单源任务可读 task.crawl_mode fallback。"""
+    allowed = SOURCE_ALLOWED_CRAWL_MODES.get(source_id, ('legacy', 'list_first'))
+    if source_id == 'xhs':
+        return 'list_first'
+    if task and source_id == 'heimao':
+        sources = task.get('sources') or []
+        if len(sources) == 1 and sources[0] == 'heimao':
+            task_mode = task.get('crawl_mode')
+            if task_mode in allowed:
+                return task_mode
+    src = cfg('sources', source_id) or {}
+    mode = src.get('crawl_mode')
+    if mode in allowed:
+        return mode
+    return SOURCE_CRAWL_DEFAULTS.get(source_id, 'legacy')
+
+
+def crawl_modes_for_task(task):
+    sources = task.get('sources') or []
+    return {sid: resolve_source_crawl_mode(sid, task) for sid in sources}
+
+
+def task_uses_shared_pool(task):
+    return any(m == 'list_first' for m in crawl_modes_for_task(task).values())
+
+
+def validate_crawl_mode_patch(source_id, crawl_mode):
+    if source_id == 'xhs' and crawl_mode != 'list_first':
+        return False, '小红书仅支持 list_first'
+    allowed = SOURCE_ALLOWED_CRAWL_MODES.get(source_id, ('legacy', 'list_first'))
+    if crawl_mode not in allowed:
+        return False, '无效 crawl_mode: %s' % crawl_mode
+    return True, ''

@@ -12,7 +12,7 @@ sys.stderr.reconfigure(encoding='utf-8')
 from flask import Flask, jsonify, request, send_file, send_from_directory, redirect
 from patchright.sync_api import sync_playwright
 from admin_auth import register_admin_routes, require_admin
-from config import get_config, save_config, cfg, build_heimao_detail_js, load_config
+from config import get_config, save_config, cfg, build_heimao_detail_js, load_config, BASE_DIR
 from auth_utils import (
     apply_cookies_to_context,
     diagnose_login,
@@ -23,6 +23,7 @@ from auth_utils import (
     save_site_cookies,
     parse_cookies_text,
 )
+from reports import structure_heimao_record
 from login_gate import (
     ensure_login_for_detail,
     heimao_wait_if_search_empty,
@@ -150,14 +151,119 @@ def ensure_chrome():
     log('Chrome启动失败! CDP端口%d未就绪' % cdp_port, 'ERROR')
     return False
 
-def connect_cdp():
-    cdp_url = _c()['chrome']['cdp_url']
+import threading
+
+_worker_ports_lock = threading.Lock()
+_worker_ports_reserved = set()
+
+
+def reserve_worker_port(port):
+    with _worker_ports_lock:
+        _worker_ports_reserved.add(int(port))
+
+
+def release_worker_port(port):
+    with _worker_ports_lock:
+        _worker_ports_reserved.discard(int(port))
+
+
+def is_worker_port_busy(port):
+    with _worker_ports_lock:
+        if int(port) in _worker_ports_reserved:
+            return True
+    return _cdp_port_open_on(int(port))
+
+
+def _cdp_port_open_on(port):
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(1)
+        ok = s.connect_ex(('127.0.0.1', int(port))) == 0
+        s.close()
+        return ok
+    except Exception:
+        return False
+
+
+def _cdp_url_for_port(port):
+    return 'http://127.0.0.1:%d' % int(port)
+
+
+def connect_cdp(cdp_port=None, reset=False):
+    if cdp_port is not None:
+        cdp_url = _cdp_url_for_port(cdp_port)
+    else:
+        cdp_url = _c()['chrome']['cdp_url']
+    if reset or cdp_port is not None:
+        _reset_playwright_session()
     if S.pw is None:
         S.pw = sync_playwright().start()
     if S.browser is None:
         S.browser = S.pw.chromium.connect_over_cdp(cdp_url)
         S.ctx = S.browser.contexts[0]
     return S.ctx
+
+
+def prepare_worker_browser(cdp_port, user_data_dir, log_fn=None, startup_url=None):
+    """为 Worker 实例启动独立 Chrome（指定 CDP 端口与 profile）。"""
+    c = _c()['chrome']
+    port = int(cdp_port)
+    profile_dir = user_data_dir
+    if profile_dir and not os.path.isabs(profile_dir):
+        profile_dir = os.path.join(BASE_DIR, profile_dir)
+    os.makedirs(profile_dir, exist_ok=True)
+    cdp_url = _cdp_url_for_port(port)
+    http_timeout = float(c.get('cdp_http_timeout', 2))
+
+    def wlog(msg, level='INFO'):
+        if log_fn:
+            log_fn(msg, level)
+        else:
+            log(msg, level)
+
+    try:
+        import urllib.request
+        req = urllib.request.Request(cdp_url + '/json/version', headers={'User-Agent': 'Mozilla/5.0'})
+        resp = urllib.request.urlopen(req, timeout=http_timeout)
+        if resp.status == 200:
+            return True
+    except Exception:
+        pass
+
+    for f in ['SingletonLock', 'SingletonCookie', 'SingletonSocket']:
+        try:
+            os.remove(os.path.join(profile_dir, f))
+        except Exception:
+            pass
+
+    url = startup_url or c.get('startup_url', 'https://tousu.sina.com.cn/')
+    wlog('启动 Worker Chrome (CDP port %d)...' % port)
+    cmd = [
+        c['exe_path'],
+        '--remote-debugging-port=%d' % port,
+        '--user-data-dir=' + profile_dir,
+    ] + list(c.get('extra_args', [])) + [url]
+    try:
+        subprocess.Popen(cmd, creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+    except Exception as e:
+        wlog('Worker Chrome 启动失败: ' + str(e), 'ERROR')
+        return False
+
+    wait_sec = int(c.get('startup_wait_seconds', 30))
+    for i in range(wait_sec):
+        time.sleep(1)
+        if _cdp_port_open_on(port):
+            try:
+                urllib.request.urlopen(cdp_url + '/json/version', timeout=http_timeout)
+                wlog('Worker Chrome 就绪 port=%d' % port)
+                time.sleep(float(c.get('ready_extra_wait_seconds', 2)))
+                return True
+            except Exception:
+                pass
+        wlog('等待 Worker Chrome... (%d/%d)' % (i + 1, wait_sec))
+    wlog('Worker Chrome 启动失败 port=%d' % port, 'ERROR')
+    return False
+
 
 def close_cdp(shutdown_browser=False, force=False):
     """断开 Playwright。CDP 模式下默认不关闭用户 Chrome，避免扫码登录态丢失。"""
@@ -768,6 +874,7 @@ def _investigation_detail_cfg(x):
     inv.setdefault('research_max_scroll_rounds', 2)
     inv.setdefault('between_detail_min', x.get('detail_wait_min', 4))
     inv.setdefault('between_detail_max', x.get('detail_wait_max', 7))
+    inv.setdefault('max_modal_per_run', 200)
     return inv
 
 
@@ -795,7 +902,7 @@ def _group_investigation_by_keyword(items):
     return order, groups
 
 
-def fetch_xhs_details_by_urls(urls_or_items, managed_session=True, log_fn=None):
+def fetch_xhs_details_by_urls(urls_or_items, managed_session=True, log_fn=None, run_id=None):
     """勘察阶段：在搜索页弹窗抓取小红书详情（禁止 goto explore）。"""
     x = _c()['xhs']
     inv = _investigation_detail_cfg(x)
@@ -806,6 +913,15 @@ def fetch_xhs_details_by_urls(urls_or_items, managed_session=True, log_fn=None):
     timeout = int(x.get('page_timeout_ms', 30000))
     after_wait = float(x.get('after_goto_wait', 5))
     source_name = x.get('source_name', '小红书')
+
+    def _quota_skip(url):
+        from intel.modal_quota import is_quota_exhausted, record_skipped_quota
+        if not run_id:
+            return False
+        if is_quota_exhausted(run_id):
+            record_skipped_quota(run_id, 1)
+            return True
+        return False
 
     def _log(msg, level='INFO'):
         if log_fn:
@@ -902,20 +1018,43 @@ def fetch_xhs_details_by_urls(urls_or_items, managed_session=True, log_fn=None):
                     results.append(_result(url, ok=False, error='dom_not_found'))
                     continue
 
+                if _quota_skip(url):
+                    results.append(_result(url, ok=False, error='modal_quota_exceeded'))
+                    continue
+
+                reserved = False
+                if run_id:
+                    from intel.modal_quota import reserve_modal_slot
+                    if not reserve_modal_slot(run_id):
+                        from intel.modal_quota import record_skipped_quota
+                        record_skipped_quota(run_id, 1)
+                        results.append(_result(url, ok=False, error='modal_quota_exceeded'))
+                        continue
+                    reserved = True
+
                 _log('  XHS勘察详情(弹窗): %s' % url[-28:])
                 detail, err = fetch_xhs_detail_via_modal(page, item, url, _log)
                 if err and is_xhs_detail_auth_failure(page, detail or {}):
                     _log('  详情未登录或内容为空，等待登录后重试…', 'WARN')
                     if not wait_for_site_login(ctx, page, 'xhs', S):
+                        if reserved and run_id:
+                            from intel.modal_quota import release_modal_slot
+                            release_modal_slot(run_id)
                         results.append(_result(url, ok=False, error='login_required'))
                         break
                     item, reason = _locate_item(page, url, note_id)
                     if not item:
+                        if reserved and run_id:
+                            from intel.modal_quota import release_modal_slot
+                            release_modal_slot(run_id)
                         results.append(_result(url, ok=False, error='dom_not_found'))
                         continue
                     detail, err = fetch_xhs_detail_via_modal(page, item, url, _log)
 
                 if err:
+                    if reserved and run_id:
+                        from intel.modal_quota import release_modal_slot
+                        release_modal_slot(run_id)
                     results.append(_result(url, ok=False, error=err[:80]))
                 else:
                     results.append(_result(url, ok=True, detail=detail))
@@ -936,6 +1075,10 @@ def index_page():
 @app.route('/dashboard')
 def dashboard_page():
     return redirect('/?tab=home', code=302)
+
+@app.route('/index.html')
+def index_html_redirect():
+    return redirect('/?tab=crawl', code=302)
 
 @app.route('/legacy/crawl')
 def legacy_crawl_page():
@@ -968,14 +1111,22 @@ def api_config_post():
 
 @app.route('/api/status')
 def api_status():
+    from intel.run_state import aggregate_worker_login_waits, get_active_run_worker_states
+
     log_count = int(cfg('logging', 'status_log_count', default=30))
+    _, worker_state = get_active_run_worker_states()
+    worker_waits = aggregate_worker_login_waits(worker_state)
     with S.lock:
+        login_wait = dict(S.login_wait) if S.login_wait else None
+        if not login_wait and worker_waits:
+            login_wait = worker_waits[0] if len(worker_waits) == 1 else {'workers': worker_waits}
         payload = {
             'browser_launched': S.browser_launched,
-            'running': S.running,
+            'running': S.running or bool(worker_state),
             'running_type': S.running_type,
             'phase': S.phase or '',
-            'login_wait': dict(S.login_wait) if S.login_wait else None,
+            'login_wait': login_wait,
+            'worker_states': worker_state or None,
             'count_heimao': len(S.results_heimao),
             'count_xhs': len(S.results_xhs),
             'logs': S.logs[-log_count:],
@@ -995,6 +1146,9 @@ def api_launch():
 def api_crawl_heimao():
     if S.running:
         return jsonify({'ok': False, 'msg': '进行中'})
+    default_port = int(_c()['chrome'].get('cdp_port', 9222))
+    if is_worker_port_busy(default_port):
+        return jsonify({'ok': False, 'msg': 'CDP 端口被 Worker 占用，请等待监测任务结束'}), 409
     h = _c()['heimao']
     d = request.get_json() or {}
     threading.Thread(
@@ -1011,6 +1165,9 @@ def api_crawl_heimao():
 def api_crawl_xhs():
     if S.running:
         return jsonify({'ok': False, 'msg': '进行中'})
+    default_port = int(_c()['chrome'].get('cdp_port', 9222))
+    if is_worker_port_busy(default_port):
+        return jsonify({'ok': False, 'msg': 'CDP 端口被 Worker 占用，请等待监测任务结束'}), 409
     x = _c()['xhs']
     d = request.get_json() or {}
     threading.Thread(
@@ -1025,7 +1182,8 @@ def api_crawl_xhs():
 
 @app.route('/api/stop', methods=['POST'])
 def api_stop():
-    S.running = False
+    from intel.run_state import request_stop_active_runs
+    request_stop_active_runs()
     log('停止')
     return jsonify({'ok': True})
 

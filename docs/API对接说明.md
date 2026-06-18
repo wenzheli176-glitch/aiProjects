@@ -169,3 +169,60 @@ score = relevance_to_number(record.relevance) * business_weight[record.source]
 可配置项：`endpoint`、`model`、`api_key` / `api_key_env`、`prompt_version`、`batch_size`、`max_body_chars`、`max_retries`、`retry_delay_sec`、`temperature`、`timeout_sec`、`mock_without_key`、`mock_default_relevance`、`system_prompt`（支持 `{partner_name}` `{aliases}` 占位符）。
 
 未配置 API Key 且 `mock_without_key=true` 时，系统使用 mock 打标，便于联调。
+
+---
+
+## Cookie 实例（Worker）
+
+面向多进程 Crawl Worker 的 Cookie 运维；读接口开放，写接口需管理员 Session。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/cookie-instances` | 列出 `monitor.workers.*.instances`：source、instance_id、cdp_port、cookies_file、条数、最近 diagnose |
+| POST | `/cookie-instances/{source_id}/{instance_id}/upload` | `{cookies: "<JSON 数组或导出文本>"}` 写入实例 cookies_file（**需管理员**） |
+| POST | `/cookie-instances/{source_id}/{instance_id}/diagnose` | 手动登录诊断（**需管理员**）；结果缓存于 `credentials/.cookie_diagnose_cache.json` |
+
+响应字段 `has_diagnose_failures=true` 时，Web 顶栏展示 Cookie 异常横幅。
+
+路径安全：仅允许项目内 `credentials/` 下文件；拒绝 `..` 与越界路径。
+
+`config.auth.{site}.cookies_file` 在更新 **该源首个 instance** Cookie 时自动同步。
+
+---
+
+## Run 状态与 stats（run_state）
+
+### 并发与停止
+
+- 是否允许新 Run / reanalyze：查 `monitor_task_runs` 是否存在 `status` 为 running/crawling/analyzing 的记录（**非**仅内存 `S.running`）。
+- `POST /api/stop`：对 active run 设 `stop_requested=1`；Orchestrator / Worker 轮询后中止。
+- `GET /api/status` 额外返回：
+  - `worker_states`：各 Worker 实例状态（含 `login_wait`）
+  - `login_wait`：单 Worker 为对象；多 Worker 为 `{workers: [...]}`
+
+Run 详情 `GET /monitor/runs/{run_id}` 的 `stats_json` 常见扩展字段：
+
+| 字段 | 说明 |
+|------|------|
+| `cookie_diagnose_failed` | Cookie 诊断失败源数 |
+| `sources_degraded` | partial diagnose 后仍继续的降级源数 |
+| `worker_instances` | `[{source_id, instance_id, status, diagnose_ok, ...}]` |
+| `investigation_modal_done` | xhs 弹窗成功次数（Run 级） |
+| `investigation_skipped_quota` | 超 `max_modal_per_run` 跳过条数 |
+
+中文标签见 `GET /api/field-labels` 或 `static/field-labels.json`（group=`monitor_run`）。
+
+### crawl_mode 说明（任务 API）
+
+`POST /monitor/tasks` 仍接受 `crawl_mode`，但 **混合源或含 xhs** 的任务以 `config.sources.{id}.crawl_mode` 为准：
+
+- **xhs**：强制 `list_first`（routine 无弹窗）
+- **heimao**：默认 `legacy`
+
+仅 **单源 heimao** 且未开 Worker 时，task 级 `crawl_mode` 仍作 fallback。UI 已隐藏/说明任务级策略降级。
+
+---
+
+## 分析并行
+
+`config.analysis.parallel_batches`（默认 **5**）控制 `intel/analyze.py` 内 ThreadPoolExecutor 并发批数；与 `batch_size` 独立。单批 LLM 失败跳过该批，不 fail 整个 Run。

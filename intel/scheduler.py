@@ -23,7 +23,8 @@ def get_scheduler():
 
 
 def _fire_scheduled_task(task_id):
-    from crawler_web import S, log
+    from crawler_web import log
+    from intel.run_state import is_monitor_busy
     from intel.db import create_task_run, finish_task_run, get_monitor_task
     from intel.runner import run_monitor_task
 
@@ -33,7 +34,7 @@ def _fire_scheduled_task(task_id):
     sched = task.get('schedule') or {}
     if not sched.get('enabled') or not (sched.get('cron') or '').strip():
         return
-    if S.running and sched.get('skip_if_running', True):
+    if is_monitor_busy() and sched.get('skip_if_running', True):
         run_id = create_task_run(task_id, 'schedule', 'incremental', status='skipped_overlap')
         finish_task_run(run_id, 'skipped_overlap', error_message='任务进行中，跳过本次定时')
         log('[scheduler] 任务 #%d 定时跳过（运行中）' % task_id, 'WARN')

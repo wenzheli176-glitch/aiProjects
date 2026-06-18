@@ -126,3 +126,13 @@ python scripts/sync_verification_tasks.py scan
 - [x] 9.3 无 `published_at` 条目：仍可 high，不因缺日期 alone 降档
 - [x] 9.4 情报列表：sentiment_label=negative 与 score 区间组合筛选正确；导出与列表一致
 - [x] 9.5 验证完成后 `python scripts/sync_verification_tasks.py push`
+
+## parallel-crawl-workers-selective-xhs
+
+<!-- archive: openspec/changes/archive/2026-06-17-parallel-crawl-workers-selective-xhs/tasks.md -->
+
+- [ ] 5.4 xhs 弹窗在 xhs Worker Chrome；heimao 详情在 heimao Worker（`monitor.workers.enabled=true`）— **需 Chrome 手动**
+- [x] 6.3 Cookie 实例 API/路径校验（`scripts/test_cookie_instances.py`）；完整 diagnose→Run **需 Chrome 手动**
+- [x] 8.3 analyze 并行逻辑（`scripts/test_analyze_parallel.py`）；生产 wall-clock **需真实 LLM Run 对比**
+- [x] 9.6 partial diagnose 降级 + max_modal skip stats（`test_source_diagnose` / `test_modal_quota` / `test_mixed_source_routing`）；混合源 wall-clock **需 Worker+Chrome 手动**
+- [ ] 验证完成后 `python scripts/sync_verification_tasks.py push`

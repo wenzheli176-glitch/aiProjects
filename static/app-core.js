@@ -110,6 +110,7 @@ function switchAppTab(tab, linkEl) {
   if (tab === 'analysis' && typeof startAiLogPoll === 'function') startAiLogPoll();
   if (tab !== 'analysis' && typeof stopAiLogPoll === 'function') stopAiLogPoll();
   if (tab === 'sources' && typeof loadSourcesPanel === 'function') loadSourcesPanel();
+  if (tab === 'cookies' && typeof loadCookieInstances === 'function') loadCookieInstances();
   if (window.FieldLabels && FieldLabels.applyFieldLabels) FieldLabels.applyFieldLabels(document);
   if (tab === 'system') {
     if (typeof loadMonitorDefaultsForm === 'function') loadMonitorDefaultsForm();
@@ -205,11 +206,28 @@ function updateGlobalStatus(d) {
   }
   const banner = document.getElementById('login-wait-banner');
   if (banner) {
-    if (d.login_wait && d.phase === 'waiting_login') {
+    if (d.login_wait) {
       banner.style.display = 'block';
       const lw = d.login_wait;
-      document.getElementById('login-wait-title').textContent = '等待登录 · ' + siteLabel(lw.site || '');
-      document.getElementById('login-wait-detail').textContent = lw.detail || '';
+      if (lw.workers && lw.workers.length > 1) {
+        document.getElementById('login-wait-title').textContent = '等待登录 · 多 Worker（' + lw.workers.length + '）';
+        const lines = lw.workers.map(function(w) {
+          const site = siteLabel(w.site || w.source_id || '');
+          const inst = w.instance_id ? ('/' + w.instance_id) : '';
+          const el = w.elapsed_sec != null ? (' ' + w.elapsed_sec + 's') : '';
+          return site + inst + el;
+        }).join(' · ');
+        document.getElementById('login-wait-detail').textContent = lines;
+      } else {
+        const site = lw.site || (lw.workers && lw.workers[0] && (lw.workers[0].site || lw.workers[0].source_id)) || '';
+        const inst = lw.instance_id || (lw.workers && lw.workers[0] && lw.workers[0].instance_id);
+        const title = '等待登录 · ' + siteLabel(site) + (inst ? (' / ' + inst) : '');
+        document.getElementById('login-wait-title').textContent = title;
+        const detail = lw.message || lw.detail || (lw.workers && lw.workers[0] && lw.workers[0].message) || '';
+        const elapsedSec = lw.elapsed_sec != null ? lw.elapsed_sec : (lw.workers && lw.workers[0] && lw.workers[0].elapsed_sec);
+        const elapsed = elapsedSec != null ? ('（已等待 ' + elapsedSec + ' 秒）') : '';
+        document.getElementById('login-wait-detail').textContent = detail + elapsed;
+      }
     } else {
       banner.style.display = 'none';
     }
@@ -219,6 +237,29 @@ function updateGlobalStatus(d) {
 }
 
 let pollTimer = null;
+let cookiePollCounter = 0;
+
+App.refreshCookieBanner = function(data) {
+  const banner = document.getElementById('cookie-diagnose-banner');
+  if (!banner) return;
+  const hasFail = data && data.has_diagnose_failures;
+  banner.style.display = hasFail ? 'block' : 'none';
+  if (hasFail && data.instances) {
+    const bad = data.instances.filter(function(i) {
+      return !i.cookies_file_exists || (i.last_diagnose && i.last_diagnose.diagnose_ok === false);
+    });
+    const names = bad.slice(0, 3).map(function(i) { return siteLabel(i.source_id) + '/' + i.instance_id; }).join('、');
+    document.getElementById('cookie-diagnose-detail').textContent = names ? ('：' + names) : '';
+  }
+};
+
+async function refreshCookieBannerFromApi() {
+  try {
+    const d = await api('/api/cookie-instances');
+    App.refreshCookieBanner(d);
+  } catch (e) {}
+}
+
 function startGlobalPoll() {
   if (pollTimer) return;
   async function tick() {
@@ -226,6 +267,8 @@ function startGlobalPoll() {
       const d = await api('/api/status');
       updateGlobalStatus(d);
     } catch (e) {}
+    cookiePollCounter += 1;
+    if (cookiePollCounter % 15 === 1) refreshCookieBannerFromApi();
   }
   tick();
   pollTimer = setInterval(tick, 2000);

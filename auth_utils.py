@@ -120,6 +120,46 @@ def save_site_cookies(site, cookies):
     return path
 
 
+def load_cookies_from_file(path, site=None):
+    path = _resolve_cookies_file(path)
+    if not path or not os.path.isfile(path):
+        return []
+    with open(path, 'r', encoding='utf-8') as f:
+        raw = json.load(f)
+    if not isinstance(raw, list):
+        return []
+    default_domain = ''
+    if site:
+        default_domain = _auth_cfg(site).get('domain', '')
+    out = []
+    for item in raw:
+        c = normalize_cookie(item)
+        if not c:
+            continue
+        if not c.get('domain') and default_domain:
+            c['domain'] = default_domain
+        if c.get('domain'):
+            out.append(c)
+    return out
+
+
+def apply_cookies_from_file(ctx, site, cookies_file, log_fn=None):
+    cookies = load_cookies_from_file(cookies_file, site=site)
+    if not cookies:
+        if log_fn:
+            log_fn('[%s] Cookie 文件为空或不存在: %s' % (site, cookies_file), 'WARN')
+        return 0
+    try:
+        ctx.add_cookies(cookies)
+    except Exception as e:
+        if log_fn:
+            log_fn('[%s] Cookie 注入失败: %s' % (site, str(e)[:80]), 'WARN')
+        return 0
+    if log_fn:
+        log_fn('[%s] 已从文件注入 %d 条 Cookie' % (site, len(cookies)))
+    return len(cookies)
+
+
 def apply_cookies_to_context(ctx, site, log_fn=None):
     ac = _auth_cfg(site)
     if ac.get('use_profile_only'):

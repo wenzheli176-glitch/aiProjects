@@ -14,6 +14,7 @@ from source_profiles import (
     extract_profile,
     filter_normalize_patch,
     filter_profile_patch,
+    validate_crawl_mode_patch,
 )
 from intel.db import (
     count_intel_records_for_task,
@@ -35,6 +36,7 @@ from intel.db import (
     list_partners,
     list_partners_priority,
     list_raw_records_paged,
+    list_run_logs,
     list_task_runs,
     update_monitor_task,
     update_partner,
@@ -51,14 +53,24 @@ _registered = False
 
 
 def _enrich_task(task):
-    from crawler_web import S
+    from intel.run_state import is_monitor_busy
     from intel.scheduler import get_next_run_at
 
     t = dict(task)
     t['raw_count'] = count_raw_records(task['id'])
     t['intel_count'] = count_intel_records_for_task(task['id'])
-    t['can_reanalyze'] = t['raw_count'] > 0 and not S.running
-    t['can_run'] = not S.running and task['status'] not in ('crawling', 'analyzing')
+    busy = is_monitor_busy()
+    t['can_reanalyze'] = t['raw_count'] > 0 and not busy
+    t['can_run'] = not busy and task['status'] not in ('crawling', 'analyzing')
+    if not t['can_run']:
+        if task['status'] in ('crawling', 'analyzing'):
+            t['run_block_reason'] = '任务正在运行中'
+        elif busy:
+            t['run_block_reason'] = '系统中有未结束的监测 Run 或手工爬取进行中'
+        else:
+            t['run_block_reason'] = '暂不可执行'
+    else:
+        t['run_block_reason'] = ''
     t['next_run_at'] = get_next_run_at(task['id'])
     last_run = None
     if task.get('last_run_id'):
@@ -215,6 +227,11 @@ def api_sources_patch(source_id):
         patch['enabled'] = bool(data['enabled'])
     if 'label' in data:
         patch['label'] = str(data['label'] or source_id).strip() or source_id
+    if 'crawl_mode' in data:
+        ok, msg = validate_crawl_mode_patch(source_id, data['crawl_mode'])
+        if not ok:
+            return jsonify({'ok': False, 'msg': msg}), 400
+        patch['crawl_mode'] = data['crawl_mode']
     if not patch:
         return jsonify({'ok': False, 'msg': '无有效字段'})
     save_config({'sources': {source_id: patch}})
@@ -263,6 +280,11 @@ def api_sources_profile_patch(source_id):
         merged_es = dict(prev_es)
         merged_es.update(crawl_patch['early_stop'])
         crawl_patch['early_stop'] = merged_es
+    if isinstance(crawl_patch.get('investigation_detail'), dict):
+        prev_inv = node.get('investigation_detail') if isinstance(node.get('investigation_detail'), dict) else {}
+        merged_inv = dict(prev_inv)
+        merged_inv.update(crawl_patch['investigation_detail'])
+        crawl_patch['investigation_detail'] = merged_inv
     merge = dict(crawl_patch)
     if norm_patch:
         node = get_config().get(source_id) or {}
@@ -396,14 +418,16 @@ def api_monitor_run_get(run_id):
     run = get_task_run(run_id)
     if not run:
         return jsonify({'ok': False, 'msg': '不存在'}), 404
-    return jsonify({'ok': True, 'run': run})
+    logs = list_run_logs(run_id, limit=int(request.args.get('log_limit', 500)))
+    return jsonify({'ok': True, 'run': run, 'logs': logs})
 
 
 @intel_bp.route('/monitor/run', methods=['POST'])
 def api_monitor_run():
-    from crawler_web import S, log
+    from crawler_web import log
+    from intel.run_state import is_monitor_busy
 
-    if S.running:
+    if is_monitor_busy():
         return jsonify({'ok': False, 'msg': '已有任务进行中'})
     data = request.get_json() or {}
     task_id = data.get('task_id')
@@ -420,13 +444,24 @@ def api_monitor_run():
         business_spec = None
 
     def _run():
-        run_monitor_task(
-            task_id,
-            log_fn=log,
-            trigger='manual',
-            analyze_mode=analyze_mode,
-            business_spec=business_spec,
-        )
+        try:
+            run_monitor_task(
+                task_id,
+                log_fn=log,
+                trigger='manual',
+                analyze_mode=analyze_mode,
+                business_spec=business_spec,
+            )
+        except Exception as e:
+            from intel.error_util import format_exception
+            from intel.db import update_task_status
+
+            msg = format_exception(e)
+            log('[monitor] 任务 #%s 启动失败: %s' % (task_id, msg), 'ERROR')
+            try:
+                update_task_status(task_id, 'failed', error_message=msg)
+            except Exception:
+                pass
 
     threading.Thread(target=_run, daemon=True).start()
     return jsonify({'ok': True, 'task_id': task_id, 'analyze_mode': analyze_mode})
@@ -740,3 +775,44 @@ def register_intel_routes(app):
         init_scheduler()
     except Exception:
         pass
+
+
+@intel_bp.route('/cookie-instances', methods=['GET'])
+def api_cookie_instances_list():
+    from intel.cookie_instances import list_cookie_instances
+    data = list_cookie_instances()
+    return jsonify({'ok': True, **data})
+
+
+@intel_bp.route('/cookie-instances/<source_id>/<instance_id>/upload', methods=['POST'])
+@require_admin
+def api_cookie_instance_upload(source_id, instance_id):
+    from intel.cookie_instances import save_instance_cookies
+    if source_id not in ('heimao', 'xhs'):
+        return jsonify({'ok': False, 'msg': '无效数据源'}), 400
+    body = request.get_json() or {}
+    cookies = body.get('cookies') or body.get('content') or ''
+    if not cookies:
+        return jsonify({'ok': False, 'msg': 'cookies 必填'}), 400
+    try:
+        result = save_instance_cookies(source_id, instance_id, cookies)
+        return jsonify({'ok': True, **result})
+    except ValueError as e:
+        return jsonify({'ok': False, 'msg': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)[:200]}), 500
+
+
+@intel_bp.route('/cookie-instances/<source_id>/<instance_id>/diagnose', methods=['POST'])
+@require_admin
+def api_cookie_instance_diagnose(source_id, instance_id):
+    from intel.cookie_instances import diagnose_instance
+    if source_id not in ('heimao', 'xhs'):
+        return jsonify({'ok': False, 'msg': '无效数据源'}), 400
+    try:
+        result = diagnose_instance(source_id, instance_id)
+        return jsonify({'ok': True, 'result': result})
+    except ValueError as e:
+        return jsonify({'ok': False, 'msg': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)[:200]}), 500

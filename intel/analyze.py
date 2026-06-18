@@ -3,9 +3,11 @@
 import json
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import cfg, load_config
 from intel.recency import apply_recency_relevance, clamp_confidence
@@ -272,6 +274,7 @@ def _log_batch_summary(log_fn, bi, batch_total, partner, batch, meta, batch_writ
 def analyze_candidates(task_id, job_id, candidates, partner, log_fn=None, run_metrics=None):
     ac = _analysis_cfg()
     batch_size = int(ac.get('batch_size') or 15)
+    parallel_batches = max(1, int(ac.get('parallel_batches') or 1))
     max_retries = int(ac.get('max_retries') or 2)
     retry_delay = float(ac.get('retry_delay_sec') or 1.5)
     model = ac.get('model') or ''
@@ -279,6 +282,8 @@ def analyze_candidates(task_id, job_id, candidates, partner, log_fn=None, run_me
     prompt_version = get_active_prompt_id() or ac.get('prompt_version') or 'default-high-recall'
     endpoint = ac.get('endpoint') or ''
     written = 0
+    written_lock = threading.Lock()
+    metrics_lock = threading.Lock()
     batches = [candidates[i:i + batch_size] for i in range(0, len(candidates), batch_size)]
     job_start = time.time()
     mock_mode = not _resolve_api_key(ac) and ac.get('mock_without_key', False)
@@ -288,17 +293,19 @@ def analyze_candidates(task_id, job_id, candidates, partner, log_fn=None, run_me
     else:
         _ai_log(
             log_fn,
-            '开始分析 · 作业 #%d · 合作方=%s · 候选 %d 条 · %d 批 · 模型=%s · endpoint=%s' % (
+            '开始分析 · 作业 #%d · 合作方=%s · 候选 %d 条 · %d 批 · 并行=%d · 模型=%s · endpoint=%s' % (
                 job_id,
                 partner.get('name') or '-',
                 len(candidates),
                 len(batches),
+                parallel_batches,
                 model or '-',
                 endpoint[:60] + ('…' if len(endpoint) > 60 else ''),
             ),
         )
 
-    for bi, batch in enumerate(batches):
+    def _process_batch(bi, batch):
+        nonlocal written
         results = None
         meta = {}
         err = None
@@ -339,7 +346,7 @@ def analyze_candidates(task_id, job_id, candidates, partner, log_fn=None, run_me
                 'elapsed_ms': int((time.time() - batch_start) * 1000),
             })
             _ai_log(log_fn, '批次 %d 最终失败，跳过该批 %d 条' % (bi + 1, len(batch)), 'ERROR')
-            continue
+            return 0
 
         result_map = {r.get('id'): r for r in results if isinstance(r, dict)}
         batch_written = 0
@@ -390,16 +397,19 @@ def analyze_candidates(task_id, job_id, candidates, partner, log_fn=None, run_me
             })
             if saved:
                 batch_written += 1
-                written += 1
+                with written_lock:
+                    written += 1
                 if run_metrics:
-                    run_metrics.record_intel_written(
-                        cand.get('source'), replaced=bool(cand.get('replace_intel')),
-                    )
+                    with metrics_lock:
+                        run_metrics.record_intel_written(
+                            cand.get('source'), replaced=bool(cand.get('replace_intel')),
+                        )
 
         status = 'mock' if meta.get('mock') else 'ok'
         batch_elapsed_ms = int((time.time() - batch_start) * 1000)
         if run_metrics:
-            run_metrics.accumulate_batch(batch, meta, batch_elapsed_ms)
+            with metrics_lock:
+                run_metrics.accumulate_batch(batch, meta, batch_elapsed_ms)
         insert_analysis_log({
             'job_id': job_id,
             'task_id': task_id,
@@ -422,14 +432,27 @@ def analyze_candidates(task_id, job_id, candidates, partner, log_fn=None, run_me
             'completion_tokens': int(meta.get('completion_tokens') or 0),
             'total_tokens': int(meta.get('total_tokens') or 0),
             'items_written': batch_written,
-            'elapsed_ms': int((time.time() - batch_start) * 1000),
+            'elapsed_ms': batch_elapsed_ms,
         })
+        with written_lock:
+            current_written = written
         update_analysis_job(
             job_id,
-            processed_count=written,
+            processed_count=current_written,
             batch_count=len(batches),
         )
         _log_batch_summary(log_fn, bi, len(batches), partner, batch, meta, batch_written, attempt_used)
+        return batch_written
+
+    workers = min(parallel_batches, len(batches)) if batches else 1
+    if workers <= 1:
+        for bi, batch in enumerate(batches):
+            _process_batch(bi, batch)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_process_batch, bi, batch) for bi, batch in enumerate(batches)]
+            for fut in as_completed(futures):
+                fut.result()
 
     elapsed = time.time() - job_start
     from intel.db import get_analysis_job

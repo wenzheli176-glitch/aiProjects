@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """数据源插件注册表。"""
 from config import cfg
+from source_profiles import resolve_source_crawl_mode, SOURCE_ALLOWED_CRAWL_MODES
 
 
 class SourceRegistry:
@@ -50,6 +51,8 @@ class SourceRegistry:
                 'registered': registered,
                 'supports_fetch_detail': getattr(crawler_cls, 'supports_fetch_detail', True) if crawler_cls else False,
                 'profile_keys': SOURCE_PROFILE_KEYS.get(source_id, []),
+                'crawl_mode': resolve_source_crawl_mode(source_id),
+                'allowed_crawl_modes': list(SOURCE_ALLOWED_CRAWL_MODES.get(source_id, ('legacy', 'list_first'))),
             })
         return out
 

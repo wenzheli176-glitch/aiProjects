@@ -33,7 +33,12 @@ class RunMetrics:
             'investigation_queued': 0,
             'investigation_done': 0,
             'investigation_failed': 0,
+            'investigation_modal_done': 0,
+            'investigation_skipped_quota': 0,
+            'cookie_diagnose_failed': 0,
+            'sources_degraded': 0,
         }
+        self.worker_instances = []
         self.timing_by_source = {}
         self.token_by_source = {}
         self.crawl_duration_ms = 0
@@ -102,6 +107,19 @@ class RunMetrics:
     def record_intel_skipped(self, count=1):
         self.stats['intel_skipped'] += int(count)
 
+    def record_worker_instance(self, source_id, instance_id, status, diagnose_ok=True):
+        self.worker_instances.append({
+            'source_id': source_id,
+            'instance_id': instance_id,
+            'status': status,
+            'diagnose_ok': bool(diagnose_ok),
+        })
+        if not diagnose_ok:
+            self.stats['cookie_diagnose_failed'] += 1
+
+    def set_sources_degraded(self, count=1):
+        self.stats['sources_degraded'] = int(count)
+
     def accumulate_batch(self, batch, meta, analyze_ms):
         if not batch:
             return
@@ -136,6 +154,8 @@ class RunMetrics:
         stats = dict(self.stats)
         stats['triage_duration_ms'] = self.triage_duration_ms
         stats['investigation_crawl_duration_ms'] = self.investigation_crawl_duration_ms
+        if self.worker_instances:
+            stats['worker_instances'] = list(self.worker_instances)
         return {
             'crawl_duration_ms': self.crawl_duration_ms,
             'analyze_duration_ms': self.analyze_duration_ms,

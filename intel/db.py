@@ -13,7 +13,7 @@ from intel.time_util import app_today_start_iso, app_tz, now_iso
 _db_lock = threading.Lock()
 _conn = None
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 8
 INTEL_SCHEMA_VERSION = '1.1'
 
 DEFAULT_SCHEDULE = {
@@ -344,6 +344,7 @@ def _migrate_schema(conn):
         )
     task_cols2 = {r[1] for r in conn.execute('PRAGMA table_info(monitor_tasks)').fetchall()}
     if 'crawl_mode' not in task_cols2:
+        # 保留列：legacy 单源 heimao 且无 Worker 时作 fallback；混合源/xhs 改读 config.sources.*.crawl_mode
         conn.execute(
             "ALTER TABLE monitor_tasks ADD COLUMN crawl_mode TEXT NOT NULL DEFAULT 'legacy'"
         )
@@ -368,6 +369,49 @@ def _migrate_schema(conn):
             FOREIGN KEY (raw_id) REFERENCES raw_records(id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_investigation_task ON investigation_queue(task_id, status);
+        """
+    )
+    run_cols = {r[1] for r in conn.execute('PRAGMA table_info(monitor_task_runs)').fetchall()}
+    if 'stop_requested' not in run_cols:
+        conn.execute(
+            "ALTER TABLE monitor_task_runs ADD COLUMN stop_requested INTEGER NOT NULL DEFAULT 0"
+        )
+    if 'worker_state_json' not in run_cols:
+        conn.execute(
+            "ALTER TABLE monitor_task_runs ADD COLUMN worker_state_json TEXT NOT NULL DEFAULT '{}'"
+        )
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS crawl_work_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL,
+            task_id INTEGER NOT NULL,
+            source_id TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            priority_score REAL NOT NULL DEFAULT 0,
+            worker_instance_id TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            claimed_at TEXT,
+            heartbeat_at TEXT,
+            skip_reason TEXT NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (run_id) REFERENCES monitor_task_runs(id) ON DELETE CASCADE,
+            FOREIGN KEY (task_id) REFERENCES monitor_tasks(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_cwq_run_status ON crawl_work_queue(run_id, status, source_id);
+        CREATE TABLE IF NOT EXISTS monitor_run_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL,
+            worker_instance_id TEXT NOT NULL DEFAULT '',
+            level TEXT NOT NULL DEFAULT 'INFO',
+            message TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (run_id) REFERENCES monitor_task_runs(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_run_logs_run ON monitor_run_logs(run_id, id);
         """
     )
     conn.execute(
@@ -652,6 +696,8 @@ def _row_task_run(row):
         'token_usage': _json_col('token_usage_json'),
         'stats': _json_col('stats_json'),
         'error_message': row['error_message'] or '',
+        'stop_requested': bool(row['stop_requested']) if 'stop_requested' in keys else False,
+        'worker_state': _json_col('worker_state_json') if 'worker_state_json' in keys else {},
     }
 
 
@@ -707,6 +753,137 @@ def finish_task_run(run_id, status='done', error_message='', metrics=None):
         )
     conn.commit()
     return get_task_run(run_id)
+
+
+def _parse_utc_iso(value):
+    from datetime import datetime, timezone
+    t = str(value or '').strip()
+    if not t:
+        return None
+    if t.endswith('Z'):
+        t = t[:-1] + '+00:00'
+    dt = datetime.fromisoformat(t)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def reclaim_stale_task_runs(max_age_sec=None):
+    """将超时仍为 running 的 Run 标记为 failed，避免阻塞 can_run。"""
+    from config import cfg
+    from datetime import datetime, timezone, timedelta
+
+    if max_age_sec is None:
+        max_age_sec = int(cfg('monitor', 'task_timeout_sec') or 7200) + 600
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_sec)
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT id, task_id, started_at FROM monitor_task_runs
+        WHERE status='running' AND (finished_at IS NULL OR finished_at='')
+        """
+    ).fetchall()
+    reclaimed = 0
+    for row in rows:
+        started = _parse_utc_iso(row['started_at'])
+        if started is None or started < cutoff:
+            finish_task_run(
+                row['id'],
+                'failed',
+                error_message='stale run reclaimed（进程异常退出或未正常结束）',
+            )
+            reclaimed += 1
+    return reclaimed
+
+
+def is_run_stop_requested(run_id):
+    conn = get_connection()
+    row = conn.execute(
+        'SELECT stop_requested FROM monitor_task_runs WHERE id=?', (run_id,),
+    ).fetchone()
+    if not row:
+        return False
+    keys = row.keys()
+    if 'stop_requested' not in keys:
+        return False
+    return bool(row['stop_requested'])
+
+
+def mark_active_runs_stop_requested():
+    conn = get_connection()
+    conn.execute(
+        """
+        UPDATE monitor_task_runs SET stop_requested=1
+        WHERE status='running' AND (finished_at IS NULL OR finished_at = '')
+        """
+    )
+    conn.commit()
+
+
+def set_run_stop_requested(run_id, value=True):
+    conn = get_connection()
+    conn.execute(
+        'UPDATE monitor_task_runs SET stop_requested=? WHERE id=?',
+        (1 if value else 0, run_id),
+    )
+    conn.commit()
+
+
+def append_run_log(run_id, message, level='INFO', worker_instance_id=''):
+    conn = get_connection()
+    now = _utc_now()
+    conn.execute(
+        """
+        INSERT INTO monitor_run_logs(run_id, worker_instance_id, level, message, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (run_id, worker_instance_id or '', level, message or '', now),
+    )
+    conn.commit()
+
+
+def list_run_logs(run_id, limit=500):
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT * FROM monitor_run_logs WHERE run_id=?
+        ORDER BY id ASC LIMIT ?
+        """,
+        (run_id, int(limit)),
+    ).fetchall()
+    out = []
+    for row in rows:
+        keys = row.keys()
+        out.append({
+            'id': row['id'],
+            'run_id': row['run_id'],
+            'worker_instance_id': row['worker_instance_id'] if 'worker_instance_id' in keys else '',
+            'level': row['level'],
+            'message': row['message'],
+            'created_at': row['created_at'],
+        })
+    return out
+
+
+def update_run_worker_state(run_id, patch):
+    conn = get_connection()
+    row = conn.execute(
+        'SELECT worker_state_json FROM monitor_task_runs WHERE id=?', (run_id,),
+    ).fetchone()
+    if not row:
+        return
+    try:
+        state = json.loads(row['worker_state_json'] or '{}')
+    except Exception:
+        state = {}
+    if not isinstance(state, dict):
+        state = {}
+    state.update(patch or {})
+    conn.execute(
+        'UPDATE monitor_task_runs SET worker_state_json=? WHERE id=?',
+        (json.dumps(state, ensure_ascii=False), run_id),
+    )
+    conn.commit()
 
 
 def get_task_run(run_id):
@@ -1811,7 +1988,7 @@ def list_investigation_queue(task_id, status='pending'):
     conn = get_connection()
     sql = 'SELECT * FROM investigation_queue WHERE task_id=?'
     params = [task_id]
-    if status:
+    if status is not None:
         sql += ' AND status=?'
         params.append(status)
     sql += ' ORDER BY priority_score DESC, id ASC'

@@ -25,50 +25,19 @@ function showToast(msg,isErr){
 function sourceHeimao(){return(appConfig&&appConfig.heimao&&appConfig.heimao.source_name)||'黑猫投诉'}
 function sourceXhs(){return(appConfig&&appConfig.xhs&&appConfig.xhs.source_name)||'小红书'}
 
-function fillAnalysisFields(ai, status){
-    ai=ai||{};
-    const set=(id,v)=>{const el=document.getElementById(id);if(el&&v!==undefined&&v!==null)el.value=v;};
-    const setNum=(id,v,d)=>{const el=document.getElementById(id);if(el)el.value=(v!=null?v:d);};
-    set('cfg-ai-provider', ai.provider||'');
-    set('cfg-ai-endpoint', ai.endpoint||'');
-    set('cfg-ai-endpoint-intl', ai.endpoint_intl||'');
-    set('cfg-ai-model', ai.model||'');
-    set('cfg-ai-prompt-ver', ai.prompt_version||'');
-    set('cfg-ai-key-env', ai.api_key_env||'MINIMAX_API_KEY');
-    setNum('cfg-ai-batch', ai.batch_size, 10);
-    setNum('cfg-ai-body-max', ai.max_body_chars, 2000);
-    setNum('cfg-ai-retries', ai.max_retries, 2);
-    setNum('cfg-ai-retry-delay', ai.retry_delay_sec, 2);
-    setNum('cfg-ai-temp', ai.temperature, 0.3);
-    setNum('cfg-ai-timeout', ai.timeout_sec, 180);
-    const mockEl=document.getElementById('cfg-ai-mock');
-    if(mockEl)mockEl.checked=!!ai.mock_without_key;
-    const mockRel=document.getElementById('cfg-ai-mock-rel');
-    if(mockRel)mockRel.value=ai.mock_default_relevance||'medium';
-    const sp=document.getElementById('cfg-ai-system-prompt');
-    if(sp)sp.value=ai.system_prompt||'';
-    const eb=document.getElementById('cfg-ai-extra-body');
-    if(eb)eb.value=ai.extra_body?JSON.stringify(ai.extra_body,null,2):'';
-    const keyEl=document.getElementById('cfg-ai-key');
-    if(keyEl){
-        if(ai.api_key&&ai.api_key!=='***已配置***')keyEl.value=ai.api_key;
-        else if(ai.api_key==='***已配置***'||(status&&status.has_api_key))keyEl.value='';
-        keyEl.placeholder=(ai.api_key==='***已配置***'||(status&&status.has_api_key))?'已配置（留空不修改）':'留空则使用环境变量';
-    }
-    const st=document.getElementById('cfg-ai-status');
-    if(st&&status){
-        if(status.mock_mode)st.textContent='当前：Mock 模式（未检测到 API Key）';
-        else if(status.has_api_key)st.textContent='当前：已配置 API Key · 模型 '+ (status.model||'');
-        else st.textContent='当前：未配置 API Key';
-    }
-}
-
-async function loadAnalysisConfigPanel(){
-    try{
-        const d=await api('/api/analysis/config');
-        if(!d.ok){showToast(d.msg||'加载大模型配置失败',true);return;}
-        fillAnalysisFields(d.analysis,d.status);
-    }catch(e){showToast('加载大模型配置失败',true);}
+function renderWorkersSummary(workers){
+    const el=document.getElementById('cfg-workers-summary');
+    if(!el)return;
+    workers=workers||{};
+    const parts=[];
+    ['heimao','xhs'].forEach(function(sid){
+        const block=workers[sid]||{};
+        (block.instances||[]).forEach(function(inst){
+            if(!inst||typeof inst!=='object')return;
+            parts.push((sid==='heimao'?'黑猫':'小红书')+' '+ (inst.instance_id||sid+'-0') +' → CDP '+(inst.cdp_port||'-'));
+        });
+    });
+    el.textContent=parts.length?('实例：'+parts.join(' · ')):'未配置 Worker 实例（见 config.json.example）';
 }
 
 function fillConfigForm(c){
@@ -129,7 +98,11 @@ function fillConfigForm(c){
     document.getElementById('cfg-auth-poll').value=ah.poll_interval_sec!=null?ah.poll_interval_sec:(ax.poll_interval_sec!=null?ax.poll_interval_sec:3);
     document.getElementById('cfg-auth-auto-export').checked=ah.auto_export_after_login!==false&&ax.auto_export_after_login!==false;
     document.getElementById('cfg-auth-x-probe-len').value=ax.detail_probe_min_content_len!=null?ax.detail_probe_min_content_len:20;
-    fillAnalysisFields(c.analysis||{}, null);
+    const mon=c.monitor||{};
+    const workers=mon.workers||{};
+    const workersEnabled=document.getElementById('cfg-workers-enabled');
+    if(workersEnabled)workersEnabled.checked=!!workers.enabled;
+    renderWorkersSummary(workers);
     applyConfigToForms();
     refreshAuthStatus();
 }
@@ -184,34 +157,13 @@ function collectConfigFromForm(){
         content_max_len:+document.getElementById('cfg-ex-content-max').value,
         reply_max_len:+document.getElementById('cfg-ex-reply-max').value
     });
-    const aiKey=document.getElementById('cfg-ai-key').value.trim();
-    let extraBody=undefined;
-    const extraRaw=document.getElementById('cfg-ai-extra-body').value.trim();
-    if(extraRaw){
-        try{extraBody=JSON.parse(extraRaw);}catch(e){throw new Error('extra_body 须为合法 JSON');}
-    }
-    const prevAi=(base.analysis&&typeof base.analysis==='object')?{...base.analysis}:{};
-    base.analysis={
-        ...prevAi,
-        provider:document.getElementById('cfg-ai-provider').value.trim(),
-        endpoint:document.getElementById('cfg-ai-endpoint').value.trim(),
-        endpoint_intl:document.getElementById('cfg-ai-endpoint-intl').value.trim(),
-        model:document.getElementById('cfg-ai-model').value.trim(),
-        prompt_version:document.getElementById('cfg-ai-prompt-ver').value.trim(),
-        api_key_env:document.getElementById('cfg-ai-key-env').value.trim()||'MINIMAX_API_KEY',
-        batch_size:+document.getElementById('cfg-ai-batch').value,
-        max_body_chars:+document.getElementById('cfg-ai-body-max').value,
-        max_retries:+document.getElementById('cfg-ai-retries').value,
-        retry_delay_sec:+document.getElementById('cfg-ai-retry-delay').value,
-        temperature:+document.getElementById('cfg-ai-temp').value,
-        timeout_sec:+document.getElementById('cfg-ai-timeout').value,
-        mock_without_key:document.getElementById('cfg-ai-mock').checked,
-        mock_default_relevance:document.getElementById('cfg-ai-mock-rel').value,
-        system_prompt:document.getElementById('cfg-ai-system-prompt').value,
-    };
-    if(extraBody!==undefined)base.analysis.extra_body=extraBody;
-    if(aiKey)base.analysis.api_key=aiKey;
-    else if(prevAi.api_key&&prevAi.api_key!=='***已配置***')base.analysis.api_key=prevAi.api_key;
+    const prevMon=(base.monitor&&typeof base.monitor==='object')?{...base.monitor}:{};
+    const prevWorkers=(prevMon.workers&&typeof prevMon.workers==='object')?{...prevMon.workers}:{};
+    const workersEnabledEl=document.getElementById('cfg-workers-enabled');
+    prevMon.workers=Object.assign({}, prevWorkers, {
+        enabled: !!(workersEnabledEl && workersEnabledEl.checked),
+    });
+    base.monitor=prevMon;
     const pollSec=+document.getElementById('cfg-auth-poll').value;
     const autoExport=document.getElementById('cfg-auth-auto-export').checked;
     merge('auth',{
@@ -242,7 +194,6 @@ async function reloadConfig(){
     try{
         const c=await api('/api/config');
         fillConfigForm(c);
-        await loadAnalysisConfigPanel();
         showToast('配置已加载');
     }catch(e){showToast('加载配置失败',true)}
 }
@@ -278,7 +229,6 @@ function switchConfigTab(name,el){
     document.querySelectorAll('.config-section').forEach(e=>e.classList.remove('active'));
     el.classList.add('active');
     document.getElementById('cfg-'+name).classList.add('active');
-    if(name==='analysis')loadAnalysisConfigPanel();
 }
 
 function renderResults(data){

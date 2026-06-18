@@ -276,6 +276,12 @@
       "type": "number",
       "help": ""
     },
+    "investigation_detail.max_modal_per_run": {
+      "label": "单次 Run 弹窗上限",
+      "group": "crawl",
+      "type": "number",
+      "help": "0 表示不限制；多 Worker 共享"
+    },
     "include_reply_in_body": {
       "label": "正文含回复",
       "group": "normalize",
@@ -574,7 +580,13 @@
       "label": "分析预留超时",
       "group": "monitor",
       "type": "number",
-      "help": "爬取完成后 AI 分析预算（秒）"
+      "help": "从 task_timeout 预留的 AI 分析预算（秒）；应小于任务总超时"
+    },
+    "min_crawl_timeout_sec": {
+      "label": "爬取保底超时",
+      "group": "monitor",
+      "type": "number",
+      "help": "爬取阶段（含 list/investigation）最少可用秒数"
     },
     "default_sources": {
       "label": "默认来源",
@@ -743,6 +755,18 @@
       "group": "monitor_run",
       "type": "number",
       "help": "勘察失败条数"
+    },
+    "investigation_modal_done": {
+      "label": "弹窗完成",
+      "group": "monitor_run",
+      "type": "number",
+      "help": "xhs 弹窗成功次数（Run 级）"
+    },
+    "investigation_skipped_quota": {
+      "label": "配额跳过",
+      "group": "monitor_run",
+      "type": "number",
+      "help": "xhs 弹窗配额超限跳过条数"
     },
     "crawl_ms": {
       "label": "爬取耗时",
