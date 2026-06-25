@@ -135,9 +135,18 @@ TBD - created by archiving change partner-risk-intel. Update Purpose after archi
 #### Scenario: 黑猫第 1 页零结果保护
 
 - **当** `protect_first_page=true` 且第 1 页 `new_count=0`
-- **则** 必须重试搜索或等待（次数 ≤ `empty_page_retry`），复用 `login_gate` 既有等待逻辑
+- **且** `empty_page_retry=0`（默认）
+- **则** 必须立即停止当前关键词（`reason=empty_page`）
+- **且** MUST NOT 因缺少 sid 进入 `WAITING_LOGIN`
+- **且** MUST NOT 重搜同一关键词
+- **且** 第 1 页零结果 alone 不得计入连续空页阈值
+
+#### Scenario: 黑猫显式配置 empty_page_retry 大于 0
+
+- **当** 管理员显式设置 `heimao.early_stop.empty_page_retry>0`
+- **且** `protect_first_page=true` 且第 1 页 `new_count=0`
+- **则** MAY 重试搜索（次数 ≤ `empty_page_retry`）
 - **且** 重试后仍无新链接时必须停止，不得无意义翻至第 2 页
-- **且** 第 1 页零结果 alone 不得计入连续空页阈值（除非重试后仍空并停止）
 
 #### Scenario: 小红书页数与黑猫对齐
 
@@ -318,7 +327,25 @@ TBD - created by archiving change partner-risk-intel. Update Purpose after archi
 
 - **当** 未在 `config.json` 中覆盖 early_stop
 - **则** 必须使用 `config.py` DEFAULT 中各源 early_stop 默认值（`enabled=true`）
+- **且** heimao 默认 `empty_page_retry` 必须为 `0`
 - **且** xhs 默认 `end_texts` 必须包含 `- THE END -`
+
+### Requirement: heimao routine 空结果直接跳过
+
+heimao CrawlAdapter 在 legacy routine crawl MUST 在关键词无投诉链接时立即进入下一项，不阻塞、不重试。
+
+#### Scenario: 空结果不阻塞队列
+
+- **当** `crawl_heimao` 因空搜索返回空列表
+- **且** 分类非 `auth_required`
+- **则** Worker MUST NOT 进入 `login_wait`
+- **且** MUST 立即 claim/执行下一 work item 或下一关键词
+
+#### Scenario: 日志可观测
+
+- **当** 关键词因空结果被跳过
+- **则** 日志 MUST 包含 `[heimao] 无结果，跳过` 与 keyword
+- **且** Run 详情 MUST 可通过 RunMetrics 查看 `heimao_skipped_empty`
 
 #### Scenario: heimao early_stop 键
 

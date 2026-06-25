@@ -65,6 +65,44 @@ def _meets_threshold(triage, min_rel, min_risk):
     return True
 
 
+def row_needs_investigation(row, partners, business_spec=None, task=None):
+    """判断单条 raw 是否需勘察（供 keyword 流水线增量使用）。"""
+    business_spec = business_spec or {}
+    if row.get('crawl_phase') == 'detail':
+        return False
+    if _heimao_routine_has_detail(row, task=task):
+        return False
+    triage = row.get('list_triage') or {}
+    if not triage.get('triage_relevance'):
+        return False
+
+    min_rel, min_risk = _threshold()
+    if business_spec.get('min_triage_relevance'):
+        min_rel = business_spec['min_triage_relevance']
+    force_ids = set(business_spec.get('force_investigation_partner_ids') or [])
+    p0s = _p0_partners(partners)
+    if force_ids:
+        p0s = [p for p in partners if p['id'] in force_ids] or p0s
+
+    try:
+        from intel.registry import registry
+        normalizer = registry.get_normalizer(row['source'])
+        normalized = normalizer.normalize(row['payload'])
+    except KeyError:
+        normalized = {'title': '', 'body': ''}
+
+    p0_hit = _force_p0_investigation(normalized, p0s)
+    force = bool(force_ids and match_all_partners(
+        normalized, [p for p in partners if p['id'] in force_ids],
+    ))
+    needs = bool(triage.get('needs_investigation')) or p0_hit or force
+    if not needs:
+        return False
+    if not p0_hit and not force and not _meets_threshold(triage, min_rel, min_risk):
+        return False
+    return True
+
+
 def _priority_score(triage, p0_hit):
     rel = _RELEVANCE_RANK.get(triage.get('triage_relevance') or 'medium', 0)
     risk = _RISK_RANK.get(triage.get('triage_risk_hint') or 'none', 0)
@@ -74,6 +112,12 @@ def _priority_score(triage, p0_hit):
     if triage.get('needs_investigation'):
         score += 3
     return score
+
+
+def _xhs_uses_keyword_pipeline(task=None):
+    """小红书 list_first 已在 keyword 流水线内完成同页勘察，不走批量 investigation。"""
+    from source_profiles import resolve_source_crawl_mode
+    return resolve_source_crawl_mode('xhs', task) == 'list_first'
 
 
 def build_investigation_queue(task_id, partners, business_spec=None, log_fn=None, task=None):
@@ -123,6 +167,8 @@ def build_investigation_queue(task_id, partners, business_spec=None, log_fn=None
                 continue
 
         url = normalized.get('url') or (row.get('payload') or {}).get('link') or ''
+        if row.get('source') == 'xhs' and _xhs_uses_keyword_pipeline(task):
+            continue
         score = _priority_score(triage, p0_hit or force)
         enqueue_investigation(task_id, row['id'], url, row['source'], score)
         queued += 1
@@ -158,6 +204,21 @@ def process_investigation_batch(source_id, batch_items, task, crawl_ctx, run_met
 
     if not batch_items:
         return {'done': 0, 'failed': 0, 'skipped': 0}
+
+    if source_id == 'xhs' and _xhs_uses_keyword_pipeline(task):
+        n = 0
+        for item in batch_items:
+            qid = item.get('queue_id')
+            if not qid:
+                continue
+            update_investigation_status(qid, 'skipped', 'xhs_keyword_pipeline')
+            n += 1
+        if (crawl_ctx or {}).get('log'):
+            crawl_ctx['log'](
+                '[xhs] 跳过批量勘察 %d 条（已在 keyword 流水线同页勘察）' % n,
+                'INFO',
+            )
+        return {'done': 0, 'failed': 0, 'skipped': n}
 
     run_id = (crawl_ctx or {}).get('run_id')
     if source_id == 'xhs' and run_id:

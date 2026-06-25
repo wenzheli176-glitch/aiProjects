@@ -135,7 +135,10 @@
       "min_pages": 1,
       "empty_pages_threshold": 1,
       "protect_first_page": true,
-      "empty_page_retry": 1
+      "empty_page_retry": 0
+    },
+    "empty_search": {
+      "login_on_missing_sid": false
     },
     "normalize": {
       "include_reply_in_body": true,
@@ -410,6 +413,15 @@
         "min_relevance": "medium",
         "min_risk_hint": "elevated"
       }
+    },
+    "partner_cohort_suggest": {
+      "enabled": true,
+      "model": "MiniMax-M3",
+      "max_candidates": 5,
+      "web_search_enabled": true,
+      "web_search_max_results": 3,
+      "mock_without_key": false,
+      "timeout_sec": 60
     }
   },
   "intel": {

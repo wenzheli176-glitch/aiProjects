@@ -38,7 +38,7 @@
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/partners` | 名单列表，`?enabled_only=1` 仅启用 |
+| GET | `/partners` | 名单列表，`?enabled_only=1` 仅启用；每条含 `stats`（`intel_medium_plus`、`intel_total`、`raw_total`、`default_task_id`） |
 | POST | `/partners` | 创建（**需管理员**） |
 | PUT | `/partners/{id}` | 更新（**需管理员**） |
 | DELETE | `/partners/{id}` | 删除（**需管理员**） |
@@ -48,18 +48,22 @@
 
 合作方字段扩展：`industry_cohort`（行业 cohort）、`priority_tier`（P0/P1/P2）。
 
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/partners/suggest-cohort` | 根据名称推荐 cohort 候选 `{name, aliases?, exclude_partner_id?}`；返回 `candidates[]`（含 `source`/`partner_count`/`is_new`）、`existing_cohorts`；只读推荐，不写入 |
+
 ## 监测任务（手动 / 定时）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/monitor/tasks` | 任务列表（含 `schedule`、`last_run`、`next_run_at`） |
-| POST | `/monitor/tasks` | 创建（**需管理员**）`{name, partner_ids[], sources[], max_pages, crawl_mode?, fetch_detail?, schedule?}` |
+| POST | `/monitor/tasks` | 创建（**需管理员**）`{name, partner_ids[], sources[], max_pages, crawl_mode?, fetch_detail?, schedule?, business_spec?}`；`business_spec.ignore_before` 为 YYYY-MM-DD |
 | GET | `/monitor/tasks/{id}` | 任务详情与状态 |
-| PUT | `/monitor/tasks/{id}` | 更新（**需管理员**），可含 `schedule` |
+| PUT | `/monitor/tasks/{id}` | 更新（**需管理员**），可含 `schedule`、`business_spec` |
 | DELETE | `/monitor/tasks/{id}` | 删除（**需管理员**） |
 | GET | `/monitor/tasks/{id}/runs` | Run 历史（分页） |
 | GET | `/monitor/runs/{run_id}` | Run 详情（分源 timing/token） |
-| POST | `/monitor/run` | 执行 `{task_id, analyze_mode?, business_spec?}`；`business_spec` 可含 `force_investigation_partner_ids[]`、`min_triage_relevance` |
+| POST | `/monitor/run` | 执行 `{task_id, analyze_mode?, business_spec?}`；`business_spec` 可含 `force_investigation_partner_ids[]`、`min_triage_relevance`、`ignore_before`（YYYY-MM-DD，分析跳过更早内容） |
 | POST | `/monitor/reanalyze` | 重跑 AI `{task_id, analyze_mode: incremental\|full_replace}`（`replace` 仍映射 full_replace） |
 
 `schedule` 对象：`{enabled, cron, timezone, preset_id, skip_if_running}`。Cron 由 Web UI 生成，不建议手改。
@@ -182,11 +186,50 @@ score = relevance_to_number(record.relevance) * business_weight[record.source]
 | POST | `/cookie-instances/{source_id}/{instance_id}/upload` | `{cookies: "<JSON 数组或导出文本>"}` 写入实例 cookies_file（**需管理员**） |
 | POST | `/cookie-instances/{source_id}/{instance_id}/diagnose` | 手动登录诊断（**需管理员**）；结果缓存于 `credentials/.cookie_diagnose_cache.json` |
 
+## 管理员数据清理
+
+**需管理员 Session**（`config.admin.enabled=true` 时）。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/admin/purge/raw` | 按任务删除源数据 |
+| POST | `/admin/purge/intel` | 按任务删除情报（保留 raw） |
+
+请求体 JSON：
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| task_id | 是 | 监测任务 ID |
+| partner_id | 否 | 限定合作方 |
+| published_before | 否 | 删除 `published_at` 早于该日期的记录（空 published_at 不匹配） |
+| dry_run | 否 | `true` 时仅返回 `matched_count`，不删除 |
+
+响应：`{ok, matched_count, deleted_count, dry_run}`。任务状态为 `crawling`/`analyzing` 时返回 400。
+
 响应字段 `has_diagnose_failures=true` 时，Web 顶栏展示 Cookie 异常横幅。
 
 路径安全：仅允许项目内 `credentials/` 下文件；拒绝 `..` 与越界路径。
 
 `config.auth.{site}.cookies_file` 在更新 **该源首个 instance** Cookie 时自动同步。
+
+## 小红书账号池（keyword 轮换）
+
+索引文件：`credentials/xhs/accounts.json`；旧 `credentials/xhs_cookies.json` 首次访问时自动迁移为 `acc-default`。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/xhs/accounts` | 账号列表、enabled 数、是否低于 `min_accounts` |
+| POST | `/xhs/accounts` | 创建账号 `{label}`（**需管理员**） |
+| PATCH | `/xhs/accounts/{id}` | 更新 `label` / `enabled` / `cooldown_until` / `ban_note` |
+| DELETE | `/xhs/accounts/{id}` | 删除账号元数据（**需管理员**，不可删 acc-default） |
+| POST | `/xhs/accounts/{id}/cookies` | 粘贴 Cookie；可选 `diagnose: true` |
+| POST | `/xhs/accounts/{id}/diagnose` | 诊断该账号 Cookie |
+| POST | `/xhs/accounts/{id}/login/start` | 打开独立 Chrome 登录页（monitor busy 时 409） |
+| GET | `/xhs/accounts/{id}/login/status` | `waiting` / `logged_in` / `timeout` |
+| POST | `/xhs/accounts/{id}/login/finish` | 导出 Cookie 并诊断 |
+| POST | `/xhs/accounts/{id}/login/cancel` | 关闭登录 Chrome |
+
+监测 Run 执行 xhs keyword 时按 round-robin 轮换账号（每 keyword 换 profile）；诊断失败跳过该号。
 
 ---
 

@@ -14,6 +14,12 @@ from crawl_early_stop import (
 )
 
 
+def test_heimao_default_empty_page_retry_zero():
+    es = early_stop_cfg('heimao', {})
+    assert es.get('empty_page_retry') == 0
+    print('OK test_heimao_default_empty_page_retry_zero')
+
+
 def test_heimao_empty_page_stop():
     es = early_stop_cfg('heimao', {'early_stop': {'enabled': True, 'empty_pages_threshold': 1, 'min_pages': 1}})
     stop, reason, c = heimao_should_stop_after_page(es, 2, 5, 0, 0)
@@ -62,6 +68,7 @@ def test_xhs_saturation_stop():
 
 
 if __name__ == '__main__':
+    test_heimao_default_empty_page_retry_zero()
     test_heimao_empty_page_stop()
     test_heimao_first_page_protect_stop()
     test_heimao_disabled_no_stop()

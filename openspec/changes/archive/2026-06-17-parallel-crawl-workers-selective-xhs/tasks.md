@@ -40,7 +40,7 @@
 - [x] 5.1 investigation enqueue：`phase=investigation` + source 路由
 - [x] 5.2 heimao/xhs Worker claim investigation items；复用现有 `crawl_investigation`
 - [x] 5.3 Orchestrator：investigation barrier 后进入 analyze
-- [ ] 5.4 手动验证：xhs 弹窗在 xhs Worker Chrome；heimao 详情在 heimao Worker
+- [x] 5.4 手动验证：xhs 弹窗在 xhs Worker Chrome；heimao 详情在 heimao Worker
 
 ## 6. Cookie 管理 + config 统一（Phase C）
 

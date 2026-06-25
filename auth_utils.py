@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import time
 
 from config import BASE_DIR, get_config
 
@@ -143,6 +144,103 @@ def load_cookies_from_file(path, site=None):
     return out
 
 
+def source_startup_url(site):
+    """按数据源返回 Chrome 启动/导航 URL（避免 xhs Worker 误开黑猫首页）。"""
+    ac = _auth_cfg(site) if site else {}
+    if site == 'xhs':
+        return ac.get('login_url') or 'https://www.xiaohongshu.com/'
+    if site == 'heimao':
+        from config import cfg
+        return ac.get('login_url') or cfg('chrome', 'startup_url') or 'https://tousu.sina.com.cn/'
+    from config import cfg
+    return cfg('chrome', 'startup_url') or 'https://tousu.sina.com.cn/'
+
+
+def _pool_xhs_cookies_file():
+    """Worker 账号池当前绑定的 Cookie 文件（绝对路径）。"""
+    try:
+        from crawler_web import S
+        raw = getattr(S, 'xhs_pool_cookies_file', None) or ''
+    except Exception:
+        raw = ''
+    if not raw:
+        return ''
+    if os.path.isabs(raw):
+        return raw if os.path.isfile(raw) else ''
+    resolved = os.path.join(BASE_DIR, raw)
+    return resolved if os.path.isfile(resolved) else ''
+
+
+def _page_is_usable(page):
+    if page is None:
+        return False
+    try:
+        if page.is_closed():
+            return False
+        _ = page.url
+        return True
+    except Exception:
+        return False
+
+
+def get_active_page(ctx, site=None, log_fn=None):
+    """取可用标签页；若用户关闭了所有页则复用/新建并尽量打开站点首页。"""
+    if not ctx:
+        return None
+    for page in ctx.pages:
+        if _page_is_usable(page):
+            return page
+    page = ctx.new_page()
+    url = source_startup_url(site) if site else ''
+    if url:
+        timeout = int(_auth_cfg(site).get('page_timeout_ms') or 45000) if site else 45000
+        try:
+            if log_fn:
+                log_fn('[%s] 重新打开 %s' % (site, url))
+            page.goto(url, wait_until='domcontentloaded', timeout=timeout)
+        except Exception as e:
+            if log_fn:
+                log_fn('[%s] 打开页面失败: %s' % (site or 'browser', str(e)[:80]), 'WARN')
+    return page
+
+
+def close_extra_pages(ctx, keep_page=None):
+    """关闭多余空白/详情标签，避免用户手动关页后反复弹出空白页。"""
+    if not ctx:
+        return
+    keep = keep_page
+    for page in list(ctx.pages):
+        if keep is not None and page is keep:
+            continue
+        if not _page_is_usable(page):
+            continue
+        try:
+            page.close()
+        except Exception:
+            pass
+
+
+def ensure_site_page(ctx, site, log_fn=None):
+    """确保浏览器当前在目标站点（Cookie 注入与登录诊断前）。"""
+    if not ctx:
+        return None
+    url = source_startup_url(site)
+    markers = {'xhs': 'xiaohongshu.com', 'heimao': 'sina.com.cn'}
+    marker = markers.get(site) or ''
+    page = get_active_page(ctx, site=site, log_fn=log_fn)
+    try:
+        cur = page.url or ''
+    except Exception:
+        cur = ''
+    if marker and marker in cur:
+        return page
+    timeout = int(_auth_cfg(site).get('page_timeout_ms') or _auth_cfg(site).get('check_timeout_ms') or 45000)
+    if log_fn:
+        log_fn('[%s] 打开 %s' % (site, url))
+    page.goto(url, wait_until='domcontentloaded', timeout=timeout)
+    return page
+
+
 def apply_cookies_from_file(ctx, site, cookies_file, log_fn=None):
     cookies = load_cookies_from_file(cookies_file, site=site)
     if not cookies:
@@ -166,6 +264,16 @@ def apply_cookies_to_context(ctx, site, log_fn=None):
         if log_fn:
             log_fn('[%s] 使用 Chrome 用户目录登录态，跳过 Cookie 注入' % site)
         return 0
+
+    pool_xhs = _pool_xhs_cookies_file() if site == 'xhs' else ''
+    if site == 'xhs' and pool_xhs:
+        browser_cookies = get_context_cookies_for_site(ctx, 'xhs')
+        if has_xhs_session(browser_cookies):
+            if log_fn:
+                log_fn('[xhs] 浏览器已有账号池会话，跳过默认 Cookie 覆盖')
+            return 0
+        return apply_cookies_from_file(ctx, 'xhs', pool_xhs, log_fn=log_fn)
+
     if site == 'heimao' and ac.get('skip_inject_if_browser_logged_out', True):
         browser_cookies = get_context_cookies_for_site(ctx, 'heimao')
         file_cookies = load_site_cookies(site)
@@ -294,6 +402,120 @@ def page_has_login_wall(page, site):
         if t and t in body:
             return True
     return False
+
+
+def xhs_page_logged_in(page):
+    """页面元素判断小红书是否已登录（profile 登录时 Cookie API 可能读不到 web_session）。"""
+    if page is None:
+        return False
+    if page_has_login_wall(page, 'xhs'):
+        return False
+    sel = (_auth_cfg('xhs').get('login_ok_selector') or '').strip()
+    if not sel:
+        return False
+    try:
+        return bool(page.query_selector(sel))
+    except Exception:
+        return False
+
+
+def xhs_session_ok(ctx, log_fn=None, cookies_file=None):
+    """
+    判断 xhs 是否可用：优先页面元素 / 浏览器 Cookie，其次 Cookie 文件注入。
+    返回 (ok, info_dict)。
+    """
+    if not ctx:
+        return False, {'error': 'no_context'}
+    ac = _auth_cfg('xhs')
+    check_url = ac.get('login_check_url') or ac.get('login_url') or source_startup_url('xhs')
+    page = ctx.pages[0] if ctx.pages else ctx.new_page()
+    timeout = int(ac.get('page_timeout_ms') or ac.get('check_timeout_ms') or 45000)
+    try:
+        cur = page.url or ''
+    except Exception:
+        cur = ''
+    if 'xiaohongshu.com' not in cur:
+        if log_fn:
+            log_fn('[xhs] 打开 %s' % check_url)
+        page.goto(check_url, wait_until='domcontentloaded', timeout=timeout)
+        time.sleep(float(ac.get('after_goto_wait', 2) or 2))
+
+    browser_cookies = get_context_cookies_for_site(ctx, 'xhs')
+    if has_xhs_session(browser_cookies):
+        return True, {
+            'login_source': 'browser_cookies',
+            'browser_cookie_count': len(browser_cookies),
+        }
+    if xhs_page_logged_in(page):
+        return True, {'login_source': 'page_selector'}
+
+    resolved = ''
+    if cookies_file:
+        resolved = cookies_file if os.path.isabs(cookies_file) else os.path.join(BASE_DIR, cookies_file)
+    if resolved and os.path.isfile(resolved):
+        file_cookies = load_cookies_from_file(resolved, site='xhs')
+        if has_xhs_session(file_cookies):
+            apply_cookies_from_file(ctx, 'xhs', resolved, log_fn=log_fn)
+            try:
+                page.goto(check_url, wait_until='domcontentloaded', timeout=timeout)
+                time.sleep(float(ac.get('after_goto_wait', 2) or 2))
+            except Exception:
+                pass
+            browser_cookies = get_context_cookies_for_site(ctx, 'xhs')
+            if has_xhs_session(browser_cookies):
+                return True, {'login_source': 'cookies_file'}
+            if xhs_page_logged_in(page):
+                return True, {'login_source': 'cookies_file+page'}
+
+    return False, {
+        'error': 'not_logged_in',
+        'browser_cookie_count': len(browser_cookies),
+        'has_login_wall': page_has_login_wall(page, 'xhs'),
+        'page_url': (page.url or '')[:120],
+    }
+
+
+def switch_xhs_account(ctx, cookies_file, log_fn=None):
+    """Worker 账号轮换：清空上下文 Cookie 后注入指定账号文件，不重启 Chrome。"""
+    if not ctx:
+        return False, {'error': 'no_context'}
+    resolved = cookies_file if os.path.isabs(cookies_file or '') else os.path.join(BASE_DIR, cookies_file or '')
+    if not resolved or not os.path.isfile(resolved):
+        return False, {'error': 'cookies_file_missing'}
+    file_cookies = load_cookies_from_file(resolved, site='xhs')
+    if not has_xhs_session(file_cookies):
+        return False, {'error': 'cookies_file_invalid'}
+
+    try:
+        ctx.clear_cookies()
+    except Exception as e:
+        if log_fn:
+            log_fn('[xhs] 清空 Cookie 失败: %s' % str(e)[:80], 'WARN')
+
+    n = apply_cookies_from_file(ctx, 'xhs', resolved, log_fn=log_fn)
+    if n <= 0:
+        return False, {'error': 'cookie_inject_failed'}
+
+    ac = _auth_cfg('xhs')
+    check_url = ac.get('login_check_url') or ac.get('login_url') or source_startup_url('xhs')
+    page = ctx.pages[0] if ctx.pages else ctx.new_page()
+    timeout = int(ac.get('page_timeout_ms') or ac.get('check_timeout_ms') or 45000)
+    try:
+        page.goto(check_url, wait_until='domcontentloaded', timeout=timeout)
+        time.sleep(float(ac.get('after_goto_wait', 2) or 2))
+    except Exception as e:
+        return False, {'error': 'goto_failed', 'detail': str(e)[:120]}
+
+    browser_cookies = get_context_cookies_for_site(ctx, 'xhs')
+    if has_xhs_session(browser_cookies):
+        return True, {'login_source': 'cookie_switch'}
+    if xhs_page_logged_in(page):
+        return True, {'login_source': 'cookie_switch+page'}
+    return False, {
+        'error': 'not_logged_in',
+        'has_login_wall': page_has_login_wall(page, 'xhs'),
+        'page_url': (page.url or '')[:120],
+    }
 
 
 def diagnose_login(ctx, site):

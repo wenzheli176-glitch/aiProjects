@@ -73,6 +73,50 @@ App.navigateRaw = function(filters) {
   App.switchAppTab('raw');
 };
 
+App.navigatePartnerDetail = function(partnerId, opts) {
+  opts = opts || {};
+  const patch = {
+    tab: 'partners',
+    partner_id: partnerId,
+    partner_tab: opts.partner_tab || 'intel',
+    intel_id: null,
+    raw_id: null,
+  };
+  if (opts.partner_tab === 'raw') {
+    if (opts.task_id != null && opts.task_id !== '') patch.task_id = opts.task_id;
+  } else {
+    patch.task_id = null;
+  }
+  App.setQuery(patch);
+  App.switchAppTab('partners');
+};
+
+App.navigateTaskDetail = function(taskId, opts) {
+  opts = opts || {};
+  App.setQuery({
+    tab: 'tasks',
+    monitor_task_id: taskId,
+    task_tab: opts.task_tab || 'overview',
+    run_id: null,
+  });
+  App.switchAppTab('tasks');
+};
+
+App.SETTINGS_TABS = ['sources', 'cookies', 'crawl', 'system', 'analysis'];
+App.DEFAULT_SETTINGS_TAB = 'system';
+
+App.isSettingsTab = function(tab) {
+  return App.SETTINGS_TABS.indexOf(tab) >= 0;
+};
+
+App.openSettings = function(subTab) {
+  const tab = App.isSettingsTab(subTab) ? subTab : App.DEFAULT_SETTINGS_TAB;
+  const q = App.readQuery();
+  q.set('tab', tab);
+  history.replaceState(null, '', '/?' + q.toString());
+  App.switchAppTab(tab);
+};
+
 function showToast(msg, isErr) {
   const t = document.getElementById('toast');
   if (!t) return;
@@ -88,10 +132,21 @@ function getTabFromUrl() {
   return App.getQuery('tab') || 'home';
 }
 
-function switchAppTab(tab, linkEl) {
-  document.querySelectorAll('.app-nav a').forEach(function(a) {
+function syncNavActiveState(tab) {
+  document.querySelectorAll('.app-nav a[data-tab]').forEach(function(a) {
     a.classList.toggle('active', a.dataset.tab === tab);
   });
+  const group = document.getElementById('navGroupSettings');
+  const toggle = document.getElementById('navSettingsToggle');
+  if (!group) return;
+  const inSettings = App.isSettingsTab(tab);
+  group.classList.toggle('is-active', inSettings);
+  if (inSettings) group.classList.add('is-expanded');
+  if (toggle) toggle.setAttribute('aria-expanded', group.classList.contains('is-expanded') ? 'true' : 'false');
+}
+
+function switchAppTab(tab, linkEl) {
+  syncNavActiveState(tab);
   document.querySelectorAll('.app-panel').forEach(function(p) {
     p.classList.toggle('active', p.id === 'panel-' + tab);
   });
@@ -104,7 +159,7 @@ function switchAppTab(tab, linkEl) {
   if (tab === 'home' && typeof loadHomeDashboard === 'function') loadHomeDashboard();
   if (tab === 'intel' && typeof onIntelTabActivate === 'function') onIntelTabActivate();
   if (tab === 'raw' && typeof onRawTabActivate === 'function') onRawTabActivate();
-  if (tab === 'partners' && typeof loadPartners === 'function') loadPartners();
+  if (tab === 'partners' && typeof onPartnersTabActivate === 'function') onPartnersTabActivate();
   if (tab === 'tasks' && typeof onTasksTabActivate === 'function') onTasksTabActivate();
   if (tab === 'analysis' && typeof loadAnalysisConfig === 'function') loadAnalysisConfig();
   if (tab === 'analysis' && typeof startAiLogPoll === 'function') startAiLogPoll();
@@ -121,20 +176,39 @@ function switchAppTab(tab, linkEl) {
 App.switchAppTab = switchAppTab;
 
 function initAppNav() {
-  document.querySelectorAll('.app-nav a').forEach(function(a) {
+  document.querySelectorAll('.app-nav a[data-tab]').forEach(function(a) {
     a.addEventListener('click', function(e) {
       e.preventDefault();
-      const tab = a.dataset.tab;
-      const q = App.readQuery();
-      q.set('tab', tab);
-      if (tab !== 'intel') q.delete('intel_id');
-      if (tab !== 'raw') q.delete('raw_id');
-      if (tab !== 'tasks') q.delete('run_id');
-      history.replaceState(null, '', '/?' + q.toString());
-      switchAppTab(tab, a);
+      navigateAppTab(a.dataset.tab, a);
     });
   });
+  const settingsToggle = document.getElementById('navSettingsToggle');
+  const settingsGroup = document.getElementById('navGroupSettings');
+  if (settingsToggle && settingsGroup) {
+    settingsToggle.addEventListener('click', function() {
+      const expanded = settingsGroup.classList.toggle('is-expanded');
+      settingsToggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    });
+  }
   switchAppTab(getTabFromUrl());
+}
+
+function navigateAppTab(tab, linkEl) {
+  const q = App.readQuery();
+  q.set('tab', tab);
+  if (tab !== 'intel') q.delete('intel_id');
+  if (tab !== 'raw') q.delete('raw_id');
+  if (tab !== 'tasks') {
+    q.delete('run_id');
+    q.delete('monitor_task_id');
+    q.delete('task_tab');
+  }
+  if (tab !== 'partners') {
+    q.delete('partner_id');
+    q.delete('partner_tab');
+  }
+  history.replaceState(null, '', '/?' + q.toString());
+  switchAppTab(tab, linkEl);
 }
 
 window.addEventListener('popstate', function() {

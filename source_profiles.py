@@ -3,7 +3,7 @@
 from config import cfg
 
 SOURCE_CRAWL_DEFAULTS = {
-    'heimao': 'legacy',
+    'heimao': 'list_first',
     'xhs': 'list_first',
 }
 
@@ -124,20 +124,20 @@ def extract_normalize_profile(source_id, config_node):
 
 
 def resolve_source_crawl_mode(source_id, task=None):
-    """源级 crawl_mode；xhs 强制 list_first。仅 heimao 单源任务可读 task.crawl_mode fallback。"""
+    """源级 crawl_mode：优先 config.sources.*，xhs 强制 list_first。"""
     allowed = SOURCE_ALLOWED_CRAWL_MODES.get(source_id, ('legacy', 'list_first'))
     if source_id == 'xhs':
         return 'list_first'
+    src = cfg('sources', source_id) or {}
+    config_mode = src.get('crawl_mode')
+    if config_mode in allowed:
+        return config_mode
     if task and source_id == 'heimao':
         sources = task.get('sources') or []
         if len(sources) == 1 and sources[0] == 'heimao':
             task_mode = task.get('crawl_mode')
             if task_mode in allowed:
                 return task_mode
-    src = cfg('sources', source_id) or {}
-    mode = src.get('crawl_mode')
-    if mode in allowed:
-        return mode
     return SOURCE_CRAWL_DEFAULTS.get(source_id, 'legacy')
 
 

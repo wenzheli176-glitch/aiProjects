@@ -2,12 +2,15 @@ credentials/*.json
 !credentials/.gitkeep
 credentials/*.env
 !credentials/*.env.example
+credentials/xhs/
+
 config.json
 config.local.json
 data/
 
 chrome_heimao_profile/
 chrome_profile/
+chrome_profiles/
 
 __pycache__/
 *.py[cod]
@@ -20,6 +23,7 @@ venv/
 *.log
 raw_export_*.json
 intel_export_*.json
+intel_export_*.xlsx
 
 .env
 .env.*

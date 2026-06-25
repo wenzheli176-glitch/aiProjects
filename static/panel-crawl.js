@@ -219,6 +219,7 @@ function applyConfigToForms(){
 }
 
 function toggleConfig(){
+    if(window.App&&App.openSettings){App.openSettings('system');return;}
     if(window.App&&App.switchAppTab){App.switchAppTab('system');return;}
     const p=document.getElementById('system-config-panel')||document.getElementById('config-panel');
     if(p)p.style.display=p.style.display==='none'?'block':'none';
@@ -257,25 +258,35 @@ function renderLogs(logs){
 function siteLabel(site){return site==='heimao'?'黑猫投诉':site==='xhs'?'小红书':site}
 
 function updateUI(s){
-    document.getElementById('dot-browser').className='status-dot'+(s.browser_launched?' active':'');
-    document.getElementById('dot-heimao').className='status-dot'+(s.running&&s.running_type==='heimao'?' running':(s.count_heimao?' active':''));
-    document.getElementById('dot-xhs').className='status-dot'+(s.running&&s.running_type==='xhs'?' running':(s.count_xhs?' active':''));
-    document.getElementById('count-heimao').textContent=s.count_heimao;
-    document.getElementById('count-xhs').textContent=s.count_xhs;
-    document.getElementById('btn-heimao').disabled=s.running;
-    document.getElementById('btn-xhs').disabled=s.running;
+    const dotB=document.getElementById('dot-browser');
+    if(dotB)dotB.className='status-dot'+(s.browser_launched?' active':'');
+    const dotH=document.getElementById('dot-heimao');
+    if(dotH)dotH.className='status-dot'+(s.running&&s.running_type==='heimao'?' running':(s.count_heimao?' active':''));
+    const dotX=document.getElementById('dot-xhs');
+    if(dotX)dotX.className='status-dot'+(s.running&&s.running_type==='xhs'?' running':(s.count_xhs?' active':''));
+    const ch=document.getElementById('count-heimao');
+    if(ch)ch.textContent=s.count_heimao;
+    const cx=document.getElementById('count-xhs');
+    if(cx)cx.textContent=s.count_xhs;
+    const btnH=document.getElementById('btn-heimao');
+    if(btnH)btnH.disabled=s.running;
+    const btnX=document.getElementById('btn-xhs');
+    if(btnX)btnX.disabled=s.running;
     const banner=document.getElementById('login-wait-banner');
+    const ri=document.getElementById('running-info');
     if(s.login_wait){
         const w=s.login_wait;
         const elapsed=w.elapsed_sec!=null?w.elapsed_sec:0;
         const left=Math.max(0,(w.timeout_sec||300)-elapsed);
-        banner.style.display='block';
-        document.getElementById('login-wait-title').textContent='等待'+siteLabel(w.site)+'登录';
-        document.getElementById('login-wait-detail').textContent='（已等待 '+elapsed+' 秒，约 '+left+' 秒后超时）';
-        document.getElementById('running-info').textContent='';
+        if(banner){
+            banner.style.display='block';
+            document.getElementById('login-wait-title').textContent='等待'+siteLabel(w.site)+'登录';
+            document.getElementById('login-wait-detail').textContent='（已等待 '+elapsed+' 秒，约 '+left+' 秒后超时）';
+        }
+        if(ri)ri.textContent='';
     }else{
-        banner.style.display='none';
-        document.getElementById('running-info').textContent=s.running?('运行中: '+s.running_type):'';
+        if(banner)banner.style.display='none';
+        if(ri)ri.textContent=s.running?('运行中: '+s.running_type):'';
     }
     renderLogs(s.logs||[]);
 }

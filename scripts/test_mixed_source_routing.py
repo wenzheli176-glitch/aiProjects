@@ -28,7 +28,7 @@ def test_xhs_forced_list_first():
 def test_mixed_task_modes():
     task = {'sources': ['heimao', 'xhs'], 'crawl_mode': 'legacy', 'fetch_detail': True}
     modes = crawl_modes_for_task(task)
-    assert modes['heimao'] == 'legacy'
+    assert modes['heimao'] == 'list_first'
     assert modes['xhs'] == 'list_first'
     assert task_uses_shared_pool(task)
     print('OK test_mixed_task_modes')
@@ -37,8 +37,9 @@ def test_mixed_task_modes():
 def test_heimao_single_task_fallback():
     task = {'sources': ['heimao'], 'crawl_mode': 'list_first'}
     assert resolve_source_crawl_mode('heimao', task) == 'list_first'
+    # 源级 config.sources.heimao.crawl_mode 优先于 task.crawl_mode
     task2 = {'sources': ['heimao'], 'crawl_mode': 'legacy'}
-    assert resolve_source_crawl_mode('heimao', task2) == 'legacy'
+    assert resolve_source_crawl_mode('heimao', task2) == 'list_first'
     print('OK test_heimao_single_task_fallback')
 
 
@@ -92,9 +93,12 @@ def test_heimao_skip_investigation():
             enqueued_sources.append(source) or 1
         )
         inv_mod.get_raw_analysis_state = lambda tid: {}
-        n = build_investigation_queue(1, [{'id': 1, 'priority_tier': 'P1'}], task=task)
-        assert n == 1, 'expected 1 queued, got %d sources=%s' % (n, enqueued_sources)
-        assert enqueued_sources == ['xhs']
+        task_with_sources = {'fetch_detail': True, 'sources': ['heimao', 'xhs']}
+        n = build_investigation_queue(
+            1, [{'id': 1, 'priority_tier': 'P1'}], task=task_with_sources,
+        )
+        assert n == 0, 'xhs list_first 不应进入批量勘察队列，got %d sources=%s' % (n, enqueued_sources)
+        assert enqueued_sources == []
     finally:
         inv_mod.registry = old_reg
         inv_mod.list_raw_records = orig_list

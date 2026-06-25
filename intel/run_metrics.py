@@ -37,6 +37,8 @@ class RunMetrics:
             'investigation_skipped_quota': 0,
             'cookie_diagnose_failed': 0,
             'sources_degraded': 0,
+            'heimao_skipped_empty': 0,
+            'intel_skipped_ignore_before': 0,
         }
         self.worker_instances = []
         self.timing_by_source = {}
@@ -106,6 +108,13 @@ class RunMetrics:
 
     def record_intel_skipped(self, count=1):
         self.stats['intel_skipped'] += int(count)
+
+    def record_intel_skipped_ignore_before(self, count=1):
+        self.stats['intel_skipped_ignore_before'] += int(count)
+        self.stats['intel_skipped'] += int(count)
+
+    def record_heimao_skipped_empty(self, count=1):
+        self.stats['heimao_skipped_empty'] += int(count)
 
     def record_worker_instance(self, source_id, instance_id, status, diagnose_ok=True):
         self.worker_instances.append({

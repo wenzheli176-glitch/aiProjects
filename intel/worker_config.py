@@ -85,3 +85,31 @@ def list_instances(source_id=None):
 def instances_for_sources(source_ids):
     wanted = set(source_ids or [])
     return [i for i in list_instances() if i.get('source_id') in wanted]
+
+
+def validate_worker_instances(instances):
+    """校验 Worker 实例：同一 cookies_file 不可被多实例共用（尤其小红书）。"""
+    errors = []
+    file_owners = {}
+    for inst in instances or []:
+        cf = (inst.get('cookies_file') or '').strip()
+        if not cf:
+            continue
+        iid = inst.get('instance_id') or '?'
+        sid = inst.get('source_id') or '?'
+        if cf in file_owners:
+            prev = file_owners[cf]
+            errors.append(
+                'cookies_file 重复: %s 被 %s(%s) 与 %s(%s) 共用'
+                % (cf, prev['instance_id'], prev['source_id'], iid, sid)
+            )
+        else:
+            file_owners[cf] = {'instance_id': iid, 'source_id': sid}
+    xhs_insts = [i for i in (instances or []) if i.get('source_id') == 'xhs']
+    if len(xhs_insts) > 1:
+        xhs_files = {(i.get('cookies_file') or '').strip() for i in xhs_insts}
+        if len(xhs_files) < len(xhs_insts):
+            errors.append(
+                '小红书多 Worker 不得共用同一 cookies_file；请为每个 instance 配置独立账号 Cookie'
+            )
+    return errors

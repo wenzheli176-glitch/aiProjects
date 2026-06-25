@@ -131,8 +131,35 @@ python scripts/sync_verification_tasks.py scan
 
 <!-- archive: openspec/changes/archive/2026-06-17-parallel-crawl-workers-selective-xhs/tasks.md -->
 
-- [ ] 5.4 xhs 弹窗在 xhs Worker Chrome；heimao 详情在 heimao Worker（`monitor.workers.enabled=true`）— **需 Chrome 手动**
+- [x] 5.4 xhs 弹窗在 xhs Worker Chrome；heimao 详情在 heimao Worker（`monitor.workers.enabled=true`）— **需 Chrome 手动**
 - [x] 6.3 Cookie 实例 API/路径校验（`scripts/test_cookie_instances.py`）；完整 diagnose→Run **需 Chrome 手动**
 - [x] 8.3 analyze 并行逻辑（`scripts/test_analyze_parallel.py`）；生产 wall-clock **需真实 LLM Run 对比**
 - [x] 9.6 partial diagnose 降级 + max_modal skip stats（`test_source_diagnose` / `test_modal_quota` / `test_mixed_source_routing`）；混合源 wall-clock **需 Worker+Chrome 手动**
+- [x] 验证完成后 `python scripts/sync_verification_tasks.py push`
+
+## xhs-keyword-pipeline-subtasks
+
+<!-- archive: openspec/changes/archive/2026-06-22-xhs-keyword-pipeline-subtasks/tasks.md -->
+
+- [x] 5.2 执行含 xhs 任务，Run 详情见 keyword 子任务表；失败 keyword 可重跑 — **需 Chrome 手动**
+- [x] 5.3 合作方设置 xhs/黑猫超时后，子任务 `timeout_sec` 与重跑行为符合预期 — **需 Chrome 手动**
+- [x] 验证完成后 `python scripts/sync_verification_tasks.py push`
+
+## task-detail-subtask-control
+
+<!-- archive: openspec/changes/archive/2026-06-23-task-detail-subtask-control/tasks.md -->
+
+- [x] 6.1 运行含 xhs+heimao 任务：子任务 Tab 见分源状态与三阶段用时；暂停 xhs 后 heimao 仍跑 — **需 Chrome 手动**
+- [x] 6.2 终止任务后 Run 为 stopped、无「继续」；暂停后可继续 — **需 Chrome 手动**
+- [x] 6.3 详情源数据/情报 Tab 运行中刷新无闪屏 — **需 UI 手动**
+- [x] 6.4 验证完成后 `python scripts/sync_verification_tasks.py push`
+
+## xhs-credential-pool-rotation
+
+<!-- change: openspec/changes/xhs-credential-pool-rotation/tasks.md -->
+
+- [x] 6.1 升级后确认 `acc-default` 自动迁移，旧监测仍可跑
+- [x] 6.2 数据源 xhs：添加第二账号 → 打开登录页 → 扫码 → 完成保存 → diagnose 通过
+- [x] 6.3 多 keyword Run：子任务 Tab 见账号列交替；单号 diagnose 失败自动换号
+- [x] 6.4 监测 Run 进行中 `login/start` 返回 409
 - [ ] 验证完成后 `python scripts/sync_verification_tasks.py push`

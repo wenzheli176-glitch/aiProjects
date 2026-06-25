@@ -16,10 +16,12 @@ function renderCookieInstances(data) {
   if (!body) return;
   const list = (data && data.instances) || [];
   if (!list.length) {
-    body.innerHTML = '<tr><td colspan="7" class="empty">无 Worker 实例配置</td></tr>';
+    body.innerHTML = '<tr><td colspan="7" class="empty">无 Worker 实例配置</td></tr>'
+      + '<tr><td colspan="7" class="meta">小红书多账号请在 <strong>数据源 → 小红书</strong> 的「登录账号池」管理。</td></tr>';
     return;
   }
-  body.innerHTML = list.map(function(inst) {
+  const xhsHint = '<tr class="meta"><td colspan="7">小红书 keyword 轮换账号：请至 <strong>数据源 → 小红书 → 登录账号池</strong> 添加/登录。</td></tr>';
+  body.innerHTML = xhsHint + list.map(function(inst) {
     const sid = inst.source_id;
     const iid = inst.instance_id;
     const hints = (inst.last_diagnose && inst.last_diagnose.info && inst.last_diagnose.info.hints) || [];

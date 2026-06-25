@@ -1,6 +1,7 @@
 let sources = [], partners = [], tasks = [], lastTaskId = null;
 let aiLogTimer = null;
 const RUN_HISTORY_LIMIT = 5;
+const SUBTASK_RUN_LIMIT = 40;
 const runHistoryState = {};
 let expandedRunHistoryTaskId = null;
 let selectedRunId = null;
@@ -81,6 +82,17 @@ function onIntelTabActivate() {
 }
 
 async function onTasksTabActivate() {
+  const monitorTaskId = App.getQuery('monitor_task_id');
+  if (monitorTaskId) {
+    const taskTab = App.getQuery('task_tab') || 'overview';
+    await openTaskDetail(parseInt(monitorTaskId, 10), taskTab);
+    const runId = App.getQuery('run_id');
+    if (runId) {
+      await openRunDrawer(parseInt(runId, 10), parseInt(monitorTaskId, 10));
+    }
+    return;
+  }
+  showTaskListView();
   await loadTasks();
   const runId = App.getQuery('run_id');
   if (runId) {
@@ -140,6 +152,11 @@ function esc(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
 }
 
+/** 生成可嵌入 HTML 双引号 onclick 属性的 JS 字符串字面量 */
+function jsAttrStr(s) {
+  return "'" + String(s ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
+}
+
 function sourceTag(s) {
   const cls = s === 'heimao' ? 'tag-heimao' : (s === 'xhs' ? 'tag-xhs' : '');
   const label = s === 'heimao' ? '黑猫' : (s === 'xhs' ? '小红书' : s);
@@ -168,7 +185,17 @@ function sentimentTag(label, score) {
 }
 
 function statusTag(s) {
-  return `<span class="tag tag-status ${esc(s || 'queued')}">${esc(s || '-')}</span>`;
+  const labels = {
+    queued: '排队',
+    crawling: '爬取中',
+    analyzing: '分析中',
+    done: '完成',
+    failed: '失败',
+    paused: '已暂停',
+    stopped: '已终止',
+  };
+  const label = labels[s] || s || '-';
+  return '<span class="tag tag-status ' + esc(s || 'queued') + '">' + esc(label) + '</span>';
 }
 
 function partnerName(id) {
@@ -219,23 +246,245 @@ function syncCrawlModeFieldVisibility() {
       : '小红书固定 list_first：常规仅列表，详情在勘察阶段弹窗。';
   } else if (heimaoOnly) {
     field.style.display = '';
-    note.textContent = '仅黑猫单源时，上方选项作为 crawl_mode fallback；多源混合请使用数据源管理中的源级配置。';
+    note.textContent = '黑猫 crawl_mode 以「数据源管理 → 黑猫投诉 → 爬取策略」为准；此处选项仅在源级未配置时作为单源黑猫任务的 fallback。';
   } else {
     field.style.display = 'none';
     note.textContent = '请选择数据来源；爬取策略由数据源配置决定。';
   }
 }
 
-function renderPartnerChecks(selectedIds) {
+function getEnabledPartnersForTask() {
+  return partners.filter(p => p.enabled);
+}
+
+function getSelectedPartnerIds() {
+  return Array.from(document.querySelectorAll('input[name=taskPartner]:checked')).map(el => parseInt(el.value, 10));
+}
+
+function isTaskFormVisible() {
+  const fields = document.getElementById('taskFormFields');
+  return !!(fields && !fields.classList.contains('hidden-form-fields'));
+}
+
+/** 任务表单在 Modal 中打开时，刷新列表后保留已选合作方，避免轮询清空勾选。 */
+function refreshTaskFormPartnerChecksIfVisible() {
+  if (!isTaskFormVisible()) return;
+  renderPartnerChecks(getSelectedPartnerIds());
+}
+
+function _partnerPickerLabels(visibleOnly) {
   const box = document.getElementById('tPartnerChecks');
-  const enabled = partners.filter(p => p.enabled);
+  if (!box) return [];
+  const labels = Array.from(box.querySelectorAll('label[data-partner-id]'));
+  if (!visibleOnly) return labels;
+  return labels.filter(l => !l.classList.contains('is-hidden'));
+}
+
+function _syncPartnerCheckLabelState(label) {
+  const input = label.querySelector('input[name=taskPartner]');
+  if (input) label.classList.toggle('is-checked', !!input.checked);
+}
+
+function updatePartnerCheckSummary() {
+  const summary = document.getElementById('tPartnerCheckSummary');
+  if (!summary) return;
+  const all = document.querySelectorAll('input[name=taskPartner]');
+  const checked = document.querySelectorAll('input[name=taskPartner]:checked');
+  const visible = _partnerPickerLabels(true);
+  const visibleChecked = visible.filter(l => l.querySelector('input[name=taskPartner]:checked')).length;
+  const filterEl = document.getElementById('tPartnerFilter');
+  const filtering = filterEl && filterEl.value.trim();
+  if (filtering && visible.length !== all.length) {
+    summary.textContent = '已选 ' + checked.length + ' / ' + all.length + '（可见 ' + visibleChecked + '/' + visible.length + '）';
+  } else {
+    summary.textContent = '已选 ' + checked.length + ' / ' + all.length;
+  }
+  _partnerPickerLabels(false).forEach(_syncPartnerCheckLabelState);
+  syncPartnerQuickPickActive();
+}
+
+function applyPartnerFilter() {
+  const q = ((document.getElementById('tPartnerFilter') || {}).value || '').trim().toLowerCase();
+  _partnerPickerLabels(false).forEach(function(label) {
+    if (!q) {
+      label.classList.remove('is-hidden');
+      return;
+    }
+    const hay = (label.getAttribute('data-search') || '').toLowerCase();
+    label.classList.toggle('is-hidden', hay.indexOf(q) === -1);
+  });
+  updatePartnerCheckSummary();
+}
+
+function taskPartnerSelectAll() {
+  _partnerPickerLabels(true).forEach(function(label) {
+    const input = label.querySelector('input[name=taskPartner]');
+    if (input) input.checked = true;
+  });
+  updatePartnerCheckSummary();
+}
+
+function taskPartnerSelectNone() {
+  document.querySelectorAll('input[name=taskPartner]').forEach(function(el) { el.checked = false; });
+  updatePartnerCheckSummary();
+}
+
+function taskPartnerSelectInvert() {
+  _partnerPickerLabels(true).forEach(function(label) {
+    const input = label.querySelector('input[name=taskPartner]');
+    if (input) input.checked = !input.checked;
+  });
+  updatePartnerCheckSummary();
+}
+
+function _partnerIdsMatching(filterFn) {
+  return getEnabledPartnersForTask().filter(filterFn).map(function(p) { return p.id; });
+}
+
+function taskPartnerToggleGroup(ids) {
+  const idList = ids || [];
+  if (!idList.length) return;
+  const inputs = idList.map(function(id) {
+    return document.querySelector('input[name=taskPartner][value="' + id + '"]');
+  }).filter(Boolean);
+  if (!inputs.length) return;
+  const allChecked = inputs.every(function(el) { return el.checked; });
+  inputs.forEach(function(el) { el.checked = !allChecked; });
+  updatePartnerCheckSummary();
+}
+
+function syncPartnerQuickPickActive() {
+  const wrap = document.getElementById('tPartnerQuickPick');
+  if (!wrap) return;
+  wrap.querySelectorAll('.partner-quick-chip[data-kind]').forEach(function(chip) {
+    const kind = chip.getAttribute('data-kind');
+    const val = chip.getAttribute('data-value') || '';
+    let ids = [];
+    if (kind === 'cohort') {
+      ids = _partnerIdsMatching(function(p) { return (p.industry_cohort || '').trim() === val; });
+    } else if (kind === 'tier') {
+      ids = _partnerIdsMatching(function(p) { return (p.priority_tier || 'P1') === val; });
+    }
+    const inputs = ids.map(function(id) {
+      return document.querySelector('input[name=taskPartner][value="' + id + '"]');
+    }).filter(Boolean);
+    const active = inputs.length > 0 && inputs.every(function(el) { return el.checked; });
+    chip.classList.toggle('is-active', active);
+  });
+}
+
+function renderPartnerQuickPick() {
+  const wrap = document.getElementById('tPartnerQuickPick');
+  if (!wrap) return;
+  const enabled = getEnabledPartnersForTask();
   if (!enabled.length) {
-    box.innerHTML = '<span class="muted">暂无启用的合作方，请先在「合作方管理」中添加</span>';
+    wrap.innerHTML = '';
     return;
   }
-  box.innerHTML = enabled.map(p =>
-    `<label><input type="checkbox" name="taskPartner" value="${p.id}" ${selectedIds.includes(p.id) ? 'checked' : ''}> ${esc(p.name)}</label>`
-  ).join('');
+  const cohortMap = {};
+  const tierMap = { P0: 0, P1: 0, P2: 0 };
+  enabled.forEach(function(p) {
+    const cohort = (p.industry_cohort || '').trim();
+    if (cohort) cohortMap[cohort] = (cohortMap[cohort] || 0) + 1;
+    const tier = p.priority_tier || 'P1';
+    if (tierMap[tier] !== undefined) tierMap[tier] += 1;
+  });
+  const cohorts = Object.keys(cohortMap).sort(function(a, b) {
+    return cohortMap[b] - cohortMap[a] || a.localeCompare(b, 'zh-CN');
+  });
+  const parts = [];
+  if (cohorts.length) {
+    parts.push('<div class="partner-quick-group"><span class="partner-quick-group-label">cohort</span>' +
+      cohorts.map(function(c) {
+        return '<button type="button" class="partner-quick-chip" data-kind="cohort" data-value="' + esc(c) + '" title="切换选择该 cohort 下合作方">' +
+          esc(c) + ' <span class="muted">(' + cohortMap[c] + ')</span></button>';
+      }).join('') + '</div>');
+  }
+  const tiers = ['P0', 'P1', 'P2'].filter(function(t) { return tierMap[t] > 0; });
+  if (tiers.length) {
+    parts.push('<div class="partner-quick-group"><span class="partner-quick-group-label">优先级</span>' +
+      tiers.map(function(t) {
+        return '<button type="button" class="partner-quick-chip" data-kind="tier" data-value="' + t + '" title="切换选择 ' + t + ' 合作方">' +
+          t + ' <span class="muted">(' + tierMap[t] + ')</span></button>';
+      }).join('') + '</div>');
+  }
+  wrap.innerHTML = parts.join('');
+  wrap.querySelectorAll('.partner-quick-chip').forEach(function(chip) {
+    chip.addEventListener('click', function() {
+      const kind = chip.getAttribute('data-kind');
+      const val = chip.getAttribute('data-value') || '';
+      let ids = [];
+      if (kind === 'cohort') {
+        ids = _partnerIdsMatching(function(p) { return (p.industry_cohort || '').trim() === val; });
+      } else if (kind === 'tier') {
+        ids = _partnerIdsMatching(function(p) { return (p.priority_tier || 'P1') === val; });
+      }
+      taskPartnerToggleGroup(ids);
+    });
+  });
+  syncPartnerQuickPickActive();
+}
+
+function _partnerSearchText(p) {
+  return [
+    p.name || '',
+    (p.aliases || []).join(' '),
+    p.industry_cohort || '',
+    p.priority_tier || '',
+  ].join(' ').toLowerCase();
+}
+
+function _partnerCheckLabelHtml(p, selectedIds) {
+  const cohort = (p.industry_cohort || '').trim();
+  const tier = p.priority_tier || 'P1';
+  const meta = [
+    cohort ? '<span class="partner-chip-meta">' + esc(cohort) + '</span>' : '',
+    '<span class="partner-chip-meta">' + esc(tier) + '</span>',
+  ].filter(Boolean).join('');
+  const checked = selectedIds.includes(p.id) ? ' checked' : '';
+  return '<label data-partner-id="' + p.id + '" data-search="' + esc(_partnerSearchText(p)) + '">' +
+    '<input type="checkbox" name="taskPartner" value="' + p.id + '"' + checked + '> ' +
+    '<span>' + esc(p.name) + '</span>' + meta + '</label>';
+}
+
+function initPartnerPickerToolbar() {
+  const root = document.getElementById('taskFormFields');
+  if (!root || root.dataset.partnerPickerBound) return;
+  root.dataset.partnerPickerBound = '1';
+  const filterEl = document.getElementById('tPartnerFilter');
+  if (filterEl) filterEl.addEventListener('input', applyPartnerFilter);
+  const btnAll = document.getElementById('tPartnerSelectAll');
+  const btnNone = document.getElementById('tPartnerSelectNone');
+  const btnInvert = document.getElementById('tPartnerSelectInvert');
+  if (btnAll) btnAll.addEventListener('click', taskPartnerSelectAll);
+  if (btnNone) btnNone.addEventListener('click', taskPartnerSelectNone);
+  if (btnInvert) btnInvert.addEventListener('click', taskPartnerSelectInvert);
+  const checks = document.getElementById('tPartnerChecks');
+  if (checks) {
+    checks.addEventListener('change', function(e) {
+      if (e.target && e.target.name === 'taskPartner') updatePartnerCheckSummary();
+    });
+  }
+}
+
+function renderPartnerChecks(selectedIds) {
+  const box = document.getElementById('tPartnerChecks');
+  if (!box) return;
+  const enabled = getEnabledPartnersForTask();
+  initPartnerPickerToolbar();
+  const filterEl = document.getElementById('tPartnerFilter');
+  if (filterEl) filterEl.value = '';
+  if (!enabled.length) {
+    box.innerHTML = '<span class="muted">暂无启用的合作方，请先在「合作方管理」中添加</span>';
+    renderPartnerQuickPick();
+    updatePartnerCheckSummary();
+    return;
+  }
+  const ids = selectedIds || getSelectedPartnerIds();
+  box.innerHTML = enabled.map(function(p) { return _partnerCheckLabelHtml(p, ids); }).join('');
+  _partnerPickerLabels(false).forEach(_syncPartnerCheckLabelState);
+  renderPartnerQuickPick();
+  updatePartnerCheckSummary();
 }
 
 function refreshPartnerSelects() {
@@ -331,30 +580,375 @@ function stopAiLogPoll() {
   }
 }
 
+let partnerDetailState = { partnerId: null, partner: null, context: null, partnerTab: 'intel', taskId: null };
+
+function showPartnerListView() {
+  const list = document.getElementById('partnerListView');
+  const detail = document.getElementById('partnerDetailView');
+  if (list) list.style.display = '';
+  if (detail) detail.style.display = 'none';
+}
+
+function showPartnerDetailView() {
+  const list = document.getElementById('partnerListView');
+  const detail = document.getElementById('partnerDetailView');
+  if (list) list.style.display = 'none';
+  if (detail) detail.style.display = '';
+}
+
+async function onPartnersTabActivate() {
+  const partnerId = App.getQuery('partner_id');
+  if (partnerId) {
+    await openPartnerDetail(parseInt(partnerId, 10));
+  } else {
+    showPartnerListView();
+    await loadPartners();
+  }
+}
+
+function backToPartnerList() {
+  App.setQuery({ partner_id: null, partner_tab: null, task_id: null });
+  showPartnerListView();
+  loadPartners();
+}
+
+function navigatePartnerIntel(partnerId) {
+  App.navigatePartnerDetail(partnerId, { partner_tab: 'intel' });
+}
+
+async function navigatePartnerRaw(partnerId) {
+  try {
+    const d = await api('/api/partners/' + partnerId + '/context');
+    App.navigatePartnerDetail(partnerId, {
+      partner_tab: 'raw',
+      task_id: d.default_task_id || null,
+    });
+  } catch (e) {
+    toastMsg(e.message || '加载失败', true);
+    App.navigatePartnerDetail(partnerId, { partner_tab: 'raw' });
+  }
+}
+
+function renderPartnerDetailHeader() {
+  const p = partnerDetailState.partner;
+  const title = document.getElementById('partnerDetailTitle');
+  const tags = document.getElementById('partnerDetailTags');
+  if (!p || !title) return;
+  title.textContent = p.name + ' #' + p.id;
+  const bits = [];
+  if (p.industry_cohort) bits.push('<span class="tag tag-medium">' + esc(p.industry_cohort) + '</span>');
+  if (p.priority_tier) bits.push('<span class="tag tag-on">' + esc(p.priority_tier) + '</span>');
+  bits.push('<span class="tag ' + (p.enabled ? 'tag-on' : 'tag-off') + '">' + (p.enabled ? '启用' : '停用') + '</span>');
+  if (tags) tags.innerHTML = bits.join('');
+}
+
+function switchPartnerSubTab(tab, linkEl) {
+  partnerDetailState.partnerTab = tab;
+  document.querySelectorAll('.partner-subtabs .tab').forEach(function(el) {
+    el.classList.toggle('active', el.getAttribute('data-partner-tab') === tab);
+  });
+  if (linkEl) linkEl.classList.add('active');
+  const intelPane = document.getElementById('partnerIntelPane');
+  const rawPane = document.getElementById('partnerRawPane');
+  if (intelPane) intelPane.style.display = tab === 'intel' ? '' : 'none';
+  if (rawPane) rawPane.style.display = tab === 'raw' ? '' : 'none';
+  const patch = { partner_tab: tab };
+  if (tab === 'intel') patch.task_id = null;
+  else if (partnerDetailState.taskId) patch.task_id = partnerDetailState.taskId;
+  App.setQuery(patch, true);
+  if (tab === 'intel') loadPartnerIntelRecords();
+  else loadPartnerRawPane();
+}
+
+async function openPartnerDetail(partnerId) {
+  showPartnerDetailView();
+  const partnerTab = App.getQuery('partner_tab') || 'intel';
+  let taskId = App.getQuery('task_id');
+  try {
+    const [partnerRes, ctx] = await Promise.all([
+      api('/api/partners/' + partnerId),
+      api('/api/partners/' + partnerId + '/context'),
+    ]);
+    if (!partnerRes.ok || !partnerRes.partner) throw new Error(partnerRes.msg || '合作方不存在');
+    if (!ctx.ok) throw new Error(ctx.msg || '加载上下文失败');
+    partnerDetailState = {
+      partnerId: partnerId,
+      partner: partnerRes.partner,
+      context: ctx,
+      partnerTab: partnerTab,
+      taskId: taskId ? parseInt(taskId, 10) : (ctx.default_task_id || null),
+    };
+    if (partnerTab === 'raw' && !partnerDetailState.taskId && ctx.default_task_id) {
+      partnerDetailState.taskId = ctx.default_task_id;
+      App.setQuery({ task_id: ctx.default_task_id }, true);
+    }
+    renderPartnerDetailHeader();
+    document.querySelectorAll('.partner-subtabs .tab').forEach(function(el) {
+      el.classList.toggle('active', el.getAttribute('data-partner-tab') === partnerTab);
+    });
+    switchPartnerSubTab(partnerTab);
+  } catch (e) {
+    toastMsg(e.message || '加载合作方详情失败', true);
+    backToPartnerList();
+  }
+}
+
+async function loadPartnerIntelRecords() {
+  const body = document.getElementById('partnerIntelTableBody');
+  const countEl = document.getElementById('partnerIntelCount');
+  if (!body || !partnerDetailState.partnerId) return;
+  const ctx = partnerDetailState.context || {};
+  const mediumPlus = (ctx.counts && ctx.counts.intel_medium_plus) || 0;
+  if (countEl) countEl.textContent = '(中及以上 ' + mediumPlus + ' 条)';
+  const params = new URLSearchParams({
+    partner_id: String(partnerDetailState.partnerId),
+    relevance_min: 'medium',
+    page: '1',
+    page_size: '100',
+  });
+  try {
+    const d = await api('/api/intel/records?' + params.toString());
+    const rows = d.records || [];
+    if (!rows.length) {
+      body.innerHTML = '<tr><td colspan="8" class="empty">暂无中及以上相关度情报</td></tr>';
+      return;
+    }
+    body.innerHTML = rows.map(function(r) {
+      return '<tr class="clickable-row" onclick="openPartnerIntelDetail(' + r.id + ')">'
+        + '<td>' + sourceTag(r.source) + '</td>'
+        + '<td>' + relTag(r.relevance) + '</td>'
+        + '<td>' + sentimentTag(r.sentiment_label, r.sentiment_score) + '</td>'
+        + '<td>' + esc((r.risk_types || []).join('、') || '-') + '</td>'
+        + '<td>' + fmtTime(r.published_at) + '</td>'
+        + '<td>' + fmtTime(r.captured_at) + '</td>'
+        + '<td class="truncate" title="' + esc(r.body || '') + '">' + esc((r.summary || r.title || '').slice(0, 80)) + '</td>'
+        + '<td class="actions" onclick="event.stopPropagation()">'
+        + '<button class="btn btn-gray btn-sm" onclick="openPartnerIntelDetail(' + r.id + ')">详情</button>'
+        + (r.url ? ' <a href="' + esc(r.url) + '" target="_blank" class="link-muted">原文</a>' : '')
+        + '</td></tr>';
+    }).join('');
+  } catch (e) {
+    body.innerHTML = '<tr><td colspan="8" class="msg-err">' + esc(e.message) + '</td></tr>';
+  }
+}
+
+function openPartnerIntelDetail(intelId) {
+  App.setQuery({ tab: 'intel', intel_id: intelId, partner_id: partnerDetailState.partnerId });
+  App.switchAppTab('intel');
+}
+
+function loadPartnerRawPane() {
+  const ctx = partnerDetailState.context || {};
+  const tasks = ctx.tasks || [];
+  const noTasksEl = document.getElementById('partnerRawNoTasks');
+  const withTasksEl = document.getElementById('partnerRawWithTasks');
+  if (!tasks.length) {
+    if (noTasksEl) noTasksEl.style.display = '';
+    if (withTasksEl) withTasksEl.style.display = 'none';
+    return;
+  }
+  if (noTasksEl) noTasksEl.style.display = 'none';
+  if (withTasksEl) withTasksEl.style.display = '';
+  const sel = document.getElementById('partnerRawTask');
+  if (sel) {
+    sel.innerHTML = tasks.map(function(t) {
+      return '<option value="' + t.id + '">#' + t.id + ' ' + esc(t.name || '') + '</option>';
+    }).join('');
+    if (partnerDetailState.taskId) sel.value = String(partnerDetailState.taskId);
+    else if (ctx.default_task_id) {
+      sel.value = String(ctx.default_task_id);
+      partnerDetailState.taskId = ctx.default_task_id;
+    }
+  }
+  loadPartnerRawRecords();
+}
+
+function onPartnerRawTaskChange() {
+  const sel = document.getElementById('partnerRawTask');
+  if (!sel || !sel.value) return;
+  partnerDetailState.taskId = parseInt(sel.value, 10);
+  App.setQuery({ task_id: partnerDetailState.taskId }, true);
+  loadPartnerRawRecords();
+}
+
+async function loadPartnerRawRecords() {
+  const body = document.getElementById('partnerRawTableBody');
+  const countEl = document.getElementById('partnerRawCount');
+  if (!body || !partnerDetailState.partnerId || !partnerDetailState.taskId) return;
+  const params = new URLSearchParams({
+    partner_id: String(partnerDetailState.partnerId),
+    task_id: String(partnerDetailState.taskId),
+    page: '1',
+    page_size: '100',
+  });
+  try {
+    const d = await api('/api/raw/records?' + params.toString());
+    const rows = d.records || [];
+    if (countEl) countEl.textContent = '(共 ' + (d.total || rows.length) + ' 条)';
+    if (!rows.length) {
+      body.innerHTML = '<tr><td colspan="8" class="empty">当前任务下暂无源数据（list 阶段可能尚未绑定 partner）</td></tr>';
+      return;
+    }
+    body.innerHTML = rows.map(function(r) {
+      return '<tr class="clickable-row" onclick="openPartnerRawDetail(' + r.id + ')">'
+        + '<td>' + r.id + '</td><td>#' + r.task_id + '</td>'
+        + '<td>' + sourceTag(r.source) + '</td><td>' + esc(r.keyword || '') + '</td>'
+        + '<td class="truncate" title="' + esc(r.title_summary || '') + '">' + esc(r.title_summary || '—') + '</td>'
+        + '<td>' + (fmtTime(r.published_at) || '—') + '</td>'
+        + '<td>' + fmtTime(r.created_at) + '</td>'
+        + '<td>' + (r.analyze_status === 'analyzed' ? '已分析' : '待分析') + '</td></tr>';
+    }).join('');
+  } catch (e) {
+    body.innerHTML = '<tr><td colspan="8" class="msg-err">' + esc(e.message) + '</td></tr>';
+  }
+}
+
+function openPartnerRawDetail(rawId) {
+  App.setQuery({
+    tab: 'raw',
+    raw_id: rawId,
+    partner_id: partnerDetailState.partnerId,
+    task_id: partnerDetailState.taskId,
+  });
+  App.switchAppTab('raw');
+}
+
+function refreshPurgeTaskSelect(selectedTaskId) {
+  const sel = document.getElementById('purgeTaskId');
+  if (!sel) return;
+  sel.innerHTML = tasks.map(function(t) {
+    return '<option value="' + t.id + '">#' + t.id + ' ' + esc(t.name || '') + '</option>';
+  }).join('');
+  if (selectedTaskId) sel.value = String(selectedTaskId);
+}
+
+function refreshPurgePartnerSelect(selectedPartnerId) {
+  const sel = document.getElementById('purgePartnerId');
+  if (!sel) return;
+  sel.innerHTML = '<option value="">全部合作方</option>' + partners.map(function(p) {
+    return '<option value="' + p.id + '">' + esc(p.name) + '</option>';
+  }).join('');
+  if (selectedPartnerId) sel.value = String(selectedPartnerId);
+}
+
+function buildPurgeBody(dryRun) {
+  const taskId = parseInt(document.getElementById('purgeTaskId').value, 10);
+  const partnerVal = document.getElementById('purgePartnerId').value;
+  const publishedBefore = document.getElementById('purgePublishedBefore').value || null;
+  const body = { task_id: taskId, dry_run: !!dryRun };
+  if (partnerVal) body.partner_id = parseInt(partnerVal, 10);
+  if (publishedBefore) body.published_before = publishedBefore;
+  return body;
+}
+
+async function runPurgePreview() {
+  const kind = document.getElementById('purgeKind').value;
+  const url = kind === 'raw' ? '/api/admin/purge/raw' : '/api/admin/purge/intel';
+  const msg = document.getElementById('purgePreviewMsg');
+  const d = await api(url, { method: 'POST', body: JSON.stringify(buildPurgeBody(true)) });
+  if (msg) msg.textContent = '预览：将匹配 ' + (d.matched_count || 0) + ' 条';
+  return d.matched_count || 0;
+}
+
+async function openPurgeModal(opts) {
+  opts = opts || {};
+  if (!App.isAdmin && App.authEnabled) {
+    toastMsg('需要管理员权限', true);
+    return;
+  }
+  if (!tasks.length) await loadTasks();
+  if (!partners.length) await loadPartners();
+  refreshPurgeTaskSelect(opts.taskId);
+  refreshPurgePartnerSelect(opts.partnerId || '');
+  document.getElementById('purgeKind').value = opts.kind || 'intel';
+  document.getElementById('purgePublishedBefore').value = opts.publishedBefore || '';
+  document.getElementById('purgePreviewMsg').textContent = '';
+  UiShell.modal({
+    title: '批量清理数据',
+    bodyHtml: '',
+    wide: true,
+    confirmLabel: '预览并确认删除',
+    cancelLabel: '取消',
+    onMount: function(wrap) {
+      mountHiddenForm(wrap, 'purgeFormFields');
+    },
+    onClose: function() { restoreHiddenForm('purgeFormFields'); },
+    onConfirm: async function() {
+      let matched = 0;
+      try {
+        matched = await runPurgePreview();
+      } catch (e) {
+        toastMsg(e.message || '预览失败', true);
+        return false;
+      }
+      if (!matched) {
+        toastMsg('没有匹配的记录', true);
+        return false;
+      }
+      const ok = await UiShell.confirm('确定删除 ' + matched + ' 条记录？此操作不可撤销。', '确认清理');
+      if (!ok) return false;
+      const kind = document.getElementById('purgeKind').value;
+      const url = kind === 'raw' ? '/api/admin/purge/raw' : '/api/admin/purge/intel';
+      try {
+        const d = await api(url, { method: 'POST', body: JSON.stringify(buildPurgeBody(false)) });
+        toastMsg('已删除 ' + (d.deleted_count || 0) + ' 条');
+        await loadTasks();
+        await loadPartners();
+        if (partnerDetailState.partnerId) await openPartnerDetail(partnerDetailState.partnerId);
+        return true;
+      } catch (e) {
+        toastMsg(e.message || '删除失败', true);
+        return false;
+      }
+    },
+  });
+}
+
+function openPurgeModalFromPartnerDetail() {
+  const ctx = partnerDetailState.context || {};
+  openPurgeModal({
+    taskId: partnerDetailState.taskId || ctx.default_task_id,
+    partnerId: partnerDetailState.partnerId,
+  });
+}
+
 async function loadPartners() {
+  const preservedPartnerIds = isTaskFormVisible() ? getSelectedPartnerIds() : null;
   const d = await api('/api/partners');
   partners = d.partners || [];
   refreshPartnerSelects();
-  renderPartnerChecks([]);
+  if (preservedPartnerIds !== null) {
+    renderPartnerChecks(preservedPartnerIds);
+  }
   const body = document.getElementById('partnerTableBody');
+  if (!body) return;
   if (!partners.length) {
-    body.innerHTML = '<tr><td colspan="8" class="empty">暂无合作方，点击「添加合作方」创建</td></tr>';
+    body.innerHTML = '<tr><td colspan="10" class="empty">暂无合作方，点击「添加合作方」创建</td></tr>';
     return;
   }
-  body.innerHTML = partners.map(p => `<tr>
+  body.innerHTML = partners.map(function(p) {
+    const st = p.stats || {};
+    const intelLabel = (st.intel_medium_plus || 0) + '/' + (st.intel_total || 0);
+    const rawLabel = st.default_task_id != null ? String(st.raw_total || 0) : '-';
+    return `<tr>
     <td>${p.id}</td>
     <td><b>${esc(p.name)}</b></td>
+    <td><button type="button" class="partner-stat-link" onclick="navigatePartnerIntel(${p.id})">${intelLabel}</button></td>
+    <td><button type="button" class="partner-stat-link" onclick="navigatePartnerRaw(${p.id})">${rawLabel}</button></td>
     <td class="truncate" title="${esc((p.aliases||[]).join('、'))}">${esc((p.aliases||[]).join('、') || '-')}</td>
     <td class="truncate" title="${esc((p.exclude_words||[]).join('、'))}">${esc((p.exclude_words||[]).join('、') || '-')}</td>
     <td class="truncate" title="${esc((p.monitor_keywords||[]).join('、'))}">${esc((p.monitor_keywords||[]).join('、') || '-')}</td>
     <td><span class="tag ${p.enabled ? 'tag-on' : 'tag-off'}">${p.enabled ? '启用' : '停用'}</span></td>
     <td>${fmtTime(p.updated_at)}</td>
-    <td class="actions">
+    <td class="actions col-actions">
+      <button class="btn btn-gray btn-sm" onclick="navigatePartnerIntel(${p.id})">查看情报</button>
+      <button class="btn btn-gray btn-sm" onclick="navigatePartnerRaw(${p.id})">查看源数据</button>
       <button class="btn btn-gray btn-sm" onclick="openPartnerModal(${p.id})">编辑</button>
       <button class="btn btn-gray btn-sm" onclick="togglePartner(${p.id})">${p.enabled ? '停用' : '启用'}</button>
       <button class="btn btn-red btn-sm" onclick="deletePartner(${p.id})">删除</button>
     </td>
-  </tr>`).join('');
+  </tr>`;
+  }).join('');
 }
 
 function resetPartnerForm() {
@@ -363,10 +957,70 @@ function resetPartnerForm() {
   document.getElementById('pAliases').value = '';
   document.getElementById('pExclude').value = '';
   document.getElementById('pMonitorKw').value = '';
+  document.getElementById('pTimeoutXhs').value = '';
+  document.getElementById('pTimeoutHeimao').value = '';
   document.getElementById('pCohort').value = '';
   document.getElementById('pPriorityTier').value = 'P1';
   document.getElementById('pNotes').value = '';
   document.getElementById('pEnabled').checked = true;
+  clearCohortSuggestChips();
+}
+
+function clearCohortSuggestChips() {
+  const el = document.getElementById('pCohortSuggestChips');
+  if (el) el.innerHTML = '';
+}
+
+function renderCohortSuggestChips(data) {
+  const wrap = document.getElementById('pCohortSuggestChips');
+  if (!wrap) return;
+  if (!data || !data.ok) {
+    wrap.innerHTML = '<span class="muted">' + esc(data && data.msg ? data.msg : '暂无推荐') + '</span>';
+    return;
+  }
+  const items = data.candidates || [];
+  if (!items.length) {
+    wrap.innerHTML = '<span class="muted">暂无推荐候选</span>';
+    return;
+  }
+  wrap.innerHTML = items.map(function(it) {
+    const meta = it.is_new
+      ? '<span class="tag tag-medium">新建</span>'
+      : (it.partner_count > 0
+        ? '<span class="tag tag-on">已有·' + it.partner_count + '家</span>'
+        : '<span class="tag tag-on">已有</span>');
+    return '<button type="button" class="cohort-chip" data-cohort="' + esc(it.cohort) + '">' +
+      '<span class="chip-label">' + esc(it.cohort) + '</span>' +
+      '<span class="chip-meta">' + meta + '</span></button>';
+  }).join('');
+  wrap.querySelectorAll('.cohort-chip').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      document.getElementById('pCohort').value = btn.getAttribute('data-cohort') || '';
+      toastMsg('已填入 cohort');
+    });
+  });
+}
+
+async function fetchCohortSuggestions() {
+  const name = document.getElementById('pName').value.trim();
+  if (!name) { toastMsg('请先填写名称', true); return; }
+  const btn = document.getElementById('pCohortSuggestBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '推荐中…'; }
+  const aliases = document.getElementById('pAliases').value.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+  const editId = document.getElementById('editPartnerId').value;
+  const body = { name, aliases };
+  if (editId) body.exclude_partner_id = parseInt(editId, 10);
+  let d;
+  try {
+    d = await api('/api/partners/suggest-cohort', { method: 'POST', body: JSON.stringify(body) });
+  } catch (e) {
+    toastMsg(e.message || '获取推荐失败', true);
+    d = { ok: false, msg: e.message };
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '获取推荐'; }
+  }
+  renderCohortSuggestChips(d);
+  if (d.ok && d.reason) toastMsg(d.reason);
 }
 
 function editPartner(id) {
@@ -377,10 +1031,14 @@ function editPartner(id) {
   document.getElementById('pAliases').value = (p.aliases || []).join(', ');
   document.getElementById('pExclude').value = (p.exclude_words || []).join(', ');
   document.getElementById('pMonitorKw').value = (p.monitor_keywords || []).join(', ');
+  const st = p.source_timeouts || {};
+  document.getElementById('pTimeoutXhs').value = st.xhs != null ? st.xhs : '';
+  document.getElementById('pTimeoutHeimao').value = st.heimao != null ? st.heimao : '';
   document.getElementById('pCohort').value = p.industry_cohort || '';
   document.getElementById('pPriorityTier').value = p.priority_tier || 'P1';
   document.getElementById('pNotes').value = p.notes || '';
   document.getElementById('pEnabled').checked = !!p.enabled;
+  clearCohortSuggestChips();
 }
 
 function openPartnerModal(id) {
@@ -391,7 +1049,11 @@ function openPartnerModal(id) {
     wide: true,
     confirmLabel: '保存',
     cancelLabel: '取消',
-    onMount: function(wrap) { mountHiddenForm(wrap, 'partnerFormFields'); },
+    onMount: function(wrap) {
+      mountHiddenForm(wrap, 'partnerFormFields');
+      const btn = document.getElementById('pCohortSuggestBtn');
+      if (btn) btn.onclick = fetchCohortSuggestions;
+    },
     onClose: function() { restoreHiddenForm('partnerFormFields'); },
     onConfirm: function() { return savePartner(); },
   });
@@ -411,6 +1073,12 @@ async function savePartner() {
     notes: document.getElementById('pNotes').value.trim(),
     enabled: document.getElementById('pEnabled').checked,
   };
+  const xhsT = parseInt(document.getElementById('pTimeoutXhs').value, 10);
+  const hmT = parseInt(document.getElementById('pTimeoutHeimao').value, 10);
+  const sourceTimeouts = {};
+  if (!isNaN(xhsT) && xhsT >= 60) sourceTimeouts.xhs = xhsT;
+  if (!isNaN(hmT) && hmT >= 60) sourceTimeouts.heimao = hmT;
+  if (Object.keys(sourceTimeouts).length) payload.source_timeouts = sourceTimeouts;
   const editId = document.getElementById('editPartnerId').value;
   let d;
   try {
@@ -510,7 +1178,467 @@ function renderRunDetailGlossary() {
     + '<div class="run-glossary-groups">' + groups + '</div></details>';
 }
 
-function buildRunDetailHtml(run, task) {
+function keywordSubtaskStatusTag(st) {
+  const map = {
+    pending: ['tag-off', '待执行'],
+    running: ['tag-medium', '运行中'],
+    done: ['tag-on', '完成'],
+    failed: ['tag-high', '失败'],
+    skipped: ['tag-off', '跳过'],
+  };
+  const m = map[st] || ['tag-off', st || '-'];
+  return '<span class="tag ' + m[0] + '">' + m[1] + '</span>';
+}
+
+function subtaskDetailStatusTag(code, label) {
+  const map = {
+    queued: ['tag-off', label || '排队'],
+    list_crawl: ['tag-medium', label || '爬取列表'],
+    investigation: ['tag-medium', label || '勘察详情'],
+    analyze: ['tag-on', label || '分析'],
+    done: ['tag-on', label || '完成'],
+    failed: ['tag-high', label || '失败'],
+    skipped: ['tag-off', label || '已跳过'],
+  };
+  const m = map[code] || ['tag-off', label || code || '-'];
+  return '<span class="tag ' + m[0] + '">' + esc(m[1]) + '</span>';
+}
+
+function fmtSubtaskPhaseMs(pt, key) {
+  if (!pt) return '-';
+  const v = pt[key];
+  return v > 0 ? fmtDuration(v) : '-';
+}
+
+function fmtXhsAccount(it) {
+  if (!it) return '-';
+  const label = it.account_label || (it.stats && it.stats.account_label) || '';
+  const id = it.account_id || (it.stats && it.stats.account_id) || '';
+  if (label && id) return label + ' (' + id + ')';
+  return label || id || '-';
+}
+
+function renderSourceSubtaskItems(items, task, sourceId) {
+  items = items || [];
+  if (!items.length) {
+    return '<p class="muted">无子任务记录</p>';
+  }
+  const failedIds = items.filter(function(it) {
+    return it.detail_status === 'failed' && it.keyword_run_id;
+  }).map(function(it) { return it.keyword_run_id; });
+  const rows = items.map(function(it) {
+    const pt = it.phase_timing_ms || {};
+    const listCount = it.stats && it.stats.list_count != null ? it.stats.list_count : '-';
+    const err = it.error_message || '';
+    const acct = sourceId === 'xhs' ? fmtXhsAccount(it) : '';
+    return '<tr data-subtask-id="' + esc(it.id || '') + '">'
+      + '<td class="truncate" title="' + esc(it.label || '') + '">' + esc(it.label || '-') + '</td>'
+      + '<td class="truncate">' + esc(it.cohort || '-') + '</td>'
+      + (sourceId === 'xhs' ? '<td class="truncate meta" title="' + esc(acct) + '">' + esc(acct) + '</td>' : '')
+      + '<td>' + subtaskDetailStatusTag(it.detail_status, it.detail_label) + '</td>'
+      + '<td class="phase-ms">' + fmtSubtaskPhaseMs(pt, 'list_crawl_ms') + '</td>'
+      + '<td class="phase-ms">' + fmtSubtaskPhaseMs(pt, 'investigation_ms') + '</td>'
+      + '<td class="phase-ms">' + fmtSubtaskPhaseMs(pt, 'analyze_ms') + '</td>'
+      + '<td>' + (it.timeout_sec ? (it.timeout_sec + 's') : '-') + '</td>'
+      + '<td>' + listCount + '</td>'
+      + '<td class="truncate" title="' + esc(err) + '">' + esc(err.slice(0, 40)) + '</td></tr>';
+  }).join('');
+  let actions = '';
+  if (failedIds.length && task && task.id && sourceId === 'xhs') {
+    actions = '<div class="btn-group" style="margin:8px 0">'
+      + '<button type="button" class="btn btn-orange btn-sm" onclick="retryFailedKeywords('
+      + task.id + ',' + JSON.stringify(failedIds) + ')">重跑失败 (' + failedIds.length + ')</button></div>';
+  }
+  return actions
+    + '<table class="run-detail-table subtask-items-table"><thead><tr>'
+    + '<th>关键词/子任务</th><th>Cohort</th>'
+    + (sourceId === 'xhs' ? '<th>账号</th>' : '')
+    + '<th>状态</th>'
+    + '<th>列表爬取</th><th>详情勘察</th><th>分析</th>'
+    + '<th>超时</th><th>列表数</th><th>错误</th>'
+    + '</tr></thead><tbody class="subtask-items-body" data-source-id="' + esc(sourceId || '') + '">'
+    + rows + '</tbody></table>';
+}
+
+function renderKeywordSubtasks(keywords, run, task) {
+  if (!keywords || !keywords.length) {
+    return '<p class="muted">无 keyword 子任务记录</p>';
+  }
+  const failedIds = keywords.filter(function(k) { return k.status === 'failed'; }).map(function(k) { return k.id; });
+  const rows = keywords.map(function(k) {
+    const acct = k.source_id === 'xhs' ? fmtXhsAccount(k) : '';
+    return '<tr><td>' + esc(k.keyword || '') + '</td>'
+      + '<td class="truncate">' + esc(k.cohort || '-') + '</td>'
+      + (k.source_id === 'xhs' ? '<td class="truncate meta" title="' + esc(acct) + '">' + esc(acct) + '</td>' : '')
+      + '<td>' + keywordSubtaskStatusTag(k.status) + '</td>'
+      + '<td>' + esc(k.phase || '-') + '</td>'
+      + '<td>' + (k.timeout_sec ? (k.timeout_sec + 's') : '-') + '</td>'
+      + '<td>' + (k.stats && k.stats.list_count != null ? k.stats.list_count : '-') + '</td>'
+      + '<td class="truncate" title="' + esc(k.error_message || '') + '">' + esc((k.error_message || '').slice(0, 40)) + '</td></tr>';
+  }).join('');
+  let actions = '';
+  if (failedIds.length && task && task.id) {
+    actions = '<div class="btn-group" style="margin:8px 0">'
+      + '<button type="button" class="btn btn-orange btn-sm" onclick="retryFailedKeywords('
+      + task.id + ',' + JSON.stringify(failedIds) + ')">重跑失败 keyword (' + failedIds.length + ')</button></div>';
+  }
+  const hasXhs = keywords.some(function(k) { return k.source_id === 'xhs'; });
+  return actions
+    + '<table class="run-detail-table"><thead><tr>'
+    + '<th>关键词</th><th>Cohort</th>'
+    + (hasXhs ? '<th>账号</th>' : '')
+    + '<th>状态</th><th>阶段</th><th>超时</th><th>列表</th><th>错误</th>'
+    + '</tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+function sourceSubtaskStatusTag(st) {
+  const map = {
+    running: ['tag-on', '运行中'],
+    pending: ['tag-medium', '待执行'],
+    done: ['tag-on', '完成'],
+    failed: ['tag-high', '失败'],
+    paused: ['tag-off', '已暂停'],
+    stopped: ['tag-high', '已终止'],
+    idle: ['tag-off', '无队列'],
+  };
+  const m = map[st] || ['tag-off', st || '-'];
+  return '<span class="tag ' + m[0] + '">' + m[1] + '</span>';
+}
+
+function renderSourceQueueSummary(q) {
+  if (!q || !q.total) return '<span class="muted">无队列项</span>';
+  return '队列 ' + (q.done || 0) + '/' + q.total
+    + (q.pending ? ' · 待 ' + q.pending : '')
+    + (q.claimed ? ' · 执行 ' + q.claimed : '')
+    + (q.failed ? ' · 失败 ' + q.failed : '')
+    + (q.skipped ? ' · 跳过 ' + q.skipped : '');
+}
+
+function renderSourceKeywordSummary(k) {
+  if (!k || !k.total) return '';
+  return 'keyword ' + (k.done || 0) + '/' + k.total
+    + (k.running ? ' · 运行 ' + k.running : '')
+    + (k.failed ? ' · 失败 ' + k.failed : '');
+}
+
+function phaseLabel(phase) {
+  const map = {
+    pending: '待执行',
+    list: '列表爬取',
+    triage: '初筛',
+    investigation: '勘察',
+    done: '完成',
+    legacy_crawl: 'Legacy 爬取',
+    keyword_pipeline: '关键词流水线',
+    list_crawl: '列表爬取',
+    crawl: '爬取',
+    analyze: 'AI 分析',
+  };
+  return map[phase] || phase || '—';
+}
+
+function renderSourcePhaseTable(src) {
+  const aw = src.active_work;
+  const ps = src.phase_summary || {};
+  const byPhase = ps.by_phase || {};
+  const rows = [];
+  const phaseOrder = ['list', 'triage', 'investigation', 'done', 'pending'];
+  phaseOrder.forEach(function(ph) {
+    const bucket = byPhase[ph];
+    if (!bucket) return;
+    const running = bucket.running || 0;
+    const done = bucket.done || 0;
+    const pending = bucket.pending || 0;
+    const failed = bucket.failed || 0;
+    if (!running && !done && !pending && !failed) return;
+    let status = pending ? ('待 ' + pending) : '';
+    if (running) status += (status ? ' · ' : '') + '运行 ' + running;
+    if (done) status += (status ? ' · ' : '') + '完成 ' + done;
+    if (failed) status += (status ? ' · ' : '') + '失败 ' + failed;
+    rows.push('<tr><td>' + esc(phaseLabel(ph)) + '</td><td>' + esc(status) + '</td><td>'
+      + ((ph === (aw && aw.phase) && aw.elapsed_ms) ? fmtDuration(aw.elapsed_ms) : '—') + '</td></tr>');
+  });
+  if (!rows.length) return '';
+  return '<table class="run-detail-table source-phase-table"><thead><tr>'
+    + '<th>阶段</th><th>子任务</th><th>当前用时</th></tr></thead><tbody>'
+    + rows.join('') + '</tbody></table>';
+}
+
+function renderSourceTimingBlock(src) {
+  const tw = src.timing || {};
+  const aw = src.active_work;
+  const ps = src.phase_summary || {};
+  const subItems = src.subtask_items || [];
+  let subCrawl = 0;
+  let subInvest = 0;
+  let subAnalyze = 0;
+  subItems.forEach(function(it) {
+    const pt = it.phase_timing_ms || {};
+    subCrawl += pt.list_crawl_ms || 0;
+    subInvest += pt.investigation_ms || 0;
+    subAnalyze += pt.analyze_ms || 0;
+  });
+  let html = '';
+  const crawlMs = Math.max(tw.crawl_ms || 0, subCrawl);
+  const investMs = Math.max(tw.investigation_crawl_ms || 0, subInvest);
+  const analyzeMs = Math.max(tw.analyze_ms || 0, subAnalyze);
+  const totalRunMs = crawlMs + investMs + analyzeMs;
+  if (totalRunMs > 0) {
+    html += '<p class="meta">Run 累计：爬取 ' + fmtDuration(crawlMs)
+      + ' · 勘察 ' + fmtDuration(investMs)
+      + ' · 分析 ' + fmtDuration(analyzeMs) + '</p>';
+  } else if (ps.done_total_ms) {
+    html += '<p class="meta">已完成 keyword 合计 ' + fmtDuration(ps.done_total_ms) + '</p>';
+  }
+  if (aw) {
+    html += '<p class="meta">当前阶段：<strong>' + esc(phaseLabel(aw.phase)) + '</strong>'
+      + ' · 已用 ' + fmtDuration(aw.elapsed_ms || 0)
+      + (aw.label ? ' · ' + esc(aw.label) : '') + '</p>';
+  }
+  const phaseTable = renderSourcePhaseTable(src);
+  if (phaseTable) html += phaseTable;
+  return html || '<p class="muted">暂无阶段数据</p>';
+}
+
+function renderCompactSourceProgress(src) {
+  const q = src.queue || {};
+  const k = src.keywords || {};
+  const aw = src.active_work;
+  const tw = src.timing || {};
+  let prog = '';
+  if (k.total) prog += 'kw ' + (k.done || 0) + '/' + k.total;
+  if (q.total) prog += (prog ? ' · ' : '') + '队列 ' + (q.done || 0) + '/' + q.total;
+  let phaseTxt = '';
+  if (aw && aw.phase) {
+    phaseTxt = phaseLabel(aw.phase) + ' ' + fmtDuration(aw.elapsed_ms || 0);
+  }
+  const runMs = (tw.crawl_ms || 0) + (tw.investigation_crawl_ms || 0) + (tw.analyze_ms || 0);
+  return '<div class="task-source-line">'
+    + sourceTag(src.source_id) + ' ' + sourceSubtaskStatusTag(src.status)
+    + (src.halt ? ' <span class="meta">(' + esc(src.halt === 'pause' ? '暂停' : '终止') + ')</span>' : '')
+    + (prog ? ' <span class="meta">' + prog + '</span>' : '')
+    + (phaseTxt ? ' <span class="meta">· ' + esc(phaseTxt) + '</span>' : '')
+    + (runMs ? ' <span class="meta">· 累计 ' + fmtDuration(runMs) + '</span>' : '')
+    + '</div>';
+}
+
+function renderTaskSourceProgress(t) {
+  const sources = (t.progress && t.progress.sources) || [];
+  if (sources.length) {
+    return '<div class="task-source-progress">' + sources.map(renderCompactSourceProgress).join('') + '</div>';
+  }
+  return formatTaskSubtasksLegacy(t);
+}
+
+function formatTaskSubtasksLegacy(t) {
+  const prog = t.progress || {};
+  const st = prog.subtasks;
+  if (!st || !st.total) return '';
+  let s = '<br><span class="meta">keyword ' + (st.done || 0) + '/' + st.total;
+  if (st.failed) s += ' · 失败 ' + st.failed;
+  if (st.running) s += ' · 运行 ' + st.running;
+  return s + '</span>';
+}
+
+function taskRowSignature(t) {
+  const prog = t.progress || {};
+  return JSON.stringify({
+    status: t.status,
+    raw: t.raw_count,
+    intel: t.intel_count,
+    can_pause: t.can_pause,
+    can_stop: t.can_stop,
+    can_resume: t.can_resume,
+    can_run: t.can_run,
+    run_block: t.run_block_reason,
+    sources: prog.sources,
+    subtasks: prog.subtasks,
+    phase: prog.phase,
+    last_run: t.last_run ? {
+      id: t.last_run.id,
+      status: t.last_run.status,
+      crawl_ms: t.last_run.crawl_duration_ms,
+      analyze_ms: t.last_run.analyze_duration_ms,
+      finished_at: t.last_run.finished_at,
+      started_at: t.last_run.started_at,
+      trigger: t.last_run.trigger,
+    } : null,
+    schedule: t.schedule && t.schedule.enabled,
+    next_run: t.next_run_at,
+    name: t.name,
+    partners: t.partner_ids,
+    sources_cfg: t.sources,
+    max_pages: t.max_pages,
+  });
+}
+
+let taskRowSigs = {};
+let taskDetailRawRowSigs = {};
+let taskDetailIntelRowSigs = {};
+
+function buildTaskActionsHtml(t) {
+  return (t.can_pause ? '<button class="btn btn-orange btn-sm" onclick="pauseTaskById(' + t.id + ')">暂停</button>' : '')
+    + (t.can_stop ? '<button class="btn btn-red btn-sm" onclick="stopTaskById(' + t.id + ',\'all\')">终止任务</button>' : '')
+    + (t.can_resume ? '<button class="btn btn-primary btn-sm" onclick="resumeTaskById(' + t.id + ')">继续</button>' : '')
+    + '<button class="btn btn-primary btn-sm" onclick="runTaskById(' + t.id + ')" ' + (!t.can_run ? 'disabled' : '') + ' title="' + esc(t.run_block_reason || '增量爬取+分析') + '">执行</button>'
+    + '<button class="btn btn-gray btn-sm" onclick="openTaskDetail(' + t.id + ')">详情</button>'
+    + '<button class="btn btn-gray btn-sm" onclick="deleteTask(' + t.id + ')" '
+    + (['crawling', 'analyzing'].includes(t.status) ? 'disabled' : '') + '>删除</button>';
+}
+
+function buildTaskRowHtml(t) {
+  return '<tr class="task-row task-row-clickable" data-task-id="' + t.id + '" onclick="openTaskDetail(' + t.id + ')">'
+    + '<td data-field="id">' + t.id + '</td>'
+    + '<td class="truncate cell-name" data-field="name" title="' + esc(t.name || '') + '">' + esc(t.name || '-') + '</td>'
+    + '<td class="cell-stack" data-field="status">' + statusTag(t.status)
+    + renderTaskSourceProgress(t)
+    + '<br><span class="meta">原始 ' + (t.raw_count || 0) + ' / 情报 ' + (t.intel_count || 0) + '</span></td>'
+    + '<td class="truncate cell-partners" data-field="partners" title="' + esc(partnerNames(t.partner_ids)) + '">' + esc(partnerNames(t.partner_ids)) + '</td>'
+    + '<td data-field="sources">' + ((t.sources || []).map(function(s) { return sourceTag(s); }).join(' ') || '-') + '</td>'
+    + '<td data-field="pages">' + (t.max_pages || '-') + '</td>'
+    + '<td class="cell-stack" data-field="lastrun">' + formatLastRun(t) + '</td>'
+    + '<td class="cell-stack" data-field="created">' + fmtTime(t.created_at) + '</td>'
+    + '<td class="actions actions-wrap col-actions" data-field="actions" onclick="event.stopPropagation()">'
+    + buildTaskActionsHtml(t) + '</td></tr>';
+}
+
+function patchTaskRow(row, t) {
+  const setField = function(field, html) {
+    const el = row.querySelector('[data-field="' + field + '"]');
+    if (el && el.innerHTML !== html) el.innerHTML = html;
+  };
+  setField('name', esc(t.name || '-'));
+  if (row.querySelector('[data-field="name"]')) {
+    row.querySelector('[data-field="name"]').setAttribute('title', t.name || '');
+  }
+  setField('status', statusTag(t.status) + renderTaskSourceProgress(t)
+    + '<br><span class="meta">原始 ' + (t.raw_count || 0) + ' / 情报 ' + (t.intel_count || 0) + '</span>');
+  setField('partners', esc(partnerNames(t.partner_ids)));
+  if (row.querySelector('[data-field="partners"]')) {
+    row.querySelector('[data-field="partners"]').setAttribute('title', partnerNames(t.partner_ids));
+  }
+  setField('sources', (t.sources || []).map(function(s) { return sourceTag(s); }).join(' ') || '-');
+  setField('pages', String(t.max_pages || '-'));
+  setField('lastrun', formatLastRun(t));
+  setField('created', fmtTime(t.created_at));
+  setField('actions', buildTaskActionsHtml(t));
+}
+
+function normalizeLegacyKeywordItems(keywords) {
+  const labels = {
+    queued: '排队', list_crawl: '爬取列表', investigation: '勘察详情',
+    analyze: '分析', done: '完成', failed: '失败', skipped: '已跳过',
+  };
+  return (keywords || []).map(function(k) {
+    let code = 'queued';
+    if (k.status === 'done') code = 'done';
+    else if (k.status === 'failed') code = 'failed';
+    else if (k.status === 'skipped') code = 'skipped';
+    else if (k.status === 'running') {
+      if (k.phase === 'investigation') code = 'investigation';
+      else if (k.phase === 'triage') code = 'analyze';
+      else code = 'list_crawl';
+    }
+    return {
+      id: 'kw:' + k.id,
+      kind: 'keyword',
+      keyword_run_id: k.id,
+      label: k.keyword,
+      cohort: k.cohort,
+      detail_status: code,
+      detail_label: labels[code],
+      elapsed_ms: 0,
+      phase_timing_ms: { list_crawl_ms: 0, analyze_ms: 0, investigation_ms: 0 },
+      timeout_sec: k.timeout_sec,
+      stats: k.stats,
+      error_message: k.error_message,
+    };
+  });
+}
+
+function renderRunSubtasksBySource(sources, task, runId) {
+  if (!sources || !sources.length) {
+    return '<p class="muted">暂无子任务数据，请点击「刷新」</p>';
+  }
+  const running = task && ['crawling', 'analyzing'].includes(task.status);
+  let html = '';
+  sources.forEach(function(src) {
+    const sid = src.source_id;
+    const q = src.queue || {};
+    const k = src.keywords || {};
+    let controls = '';
+    if (running && task && task.id) {
+      controls = '<div class="btn-group" style="margin:8px 0">'
+        + '<button type="button" class="btn btn-orange btn-sm" onclick="pauseTaskById(' + task.id + ',' + jsAttrStr(sid) + ')">暂停 ' + sourceTag(sid) + '</button>'
+        + '</div>';
+    }
+    html += '<div class="task-source-card source-subtask-block ' + (src.status === 'failed' ? 'is-failed' : (src.status === 'running' ? 'is-running' : (src.status === 'done' ? 'is-done' : ''))) + '" data-source-id="' + esc(sid) + '">'
+      + '<div class="task-source-card-head">'
+      + '<div class="task-source-card-title">' + sourceTag(sid) + ' ' + sourceSubtaskStatusTag(src.status)
+      + (src.halt ? ' <span class="meta">(' + esc(src.halt === 'pause' ? '已请求暂停' : '已请求终止') + ')</span>' : '')
+      + '</div></div>'
+      + controls
+      + '<div class="task-source-card-metrics source-summary-wrap">' + renderSourceQueueSummary(q)
+      + (k.total ? ' · ' + renderSourceKeywordSummary(k) : '')
+      + '</div>'
+      + '<div class="task-source-card-timing source-timing-block">' + renderSourceTimingBlock(src) + '</div>';
+    const subItems = src.subtask_items && src.subtask_items.length
+      ? src.subtask_items
+      : normalizeLegacyKeywordItems(src.keyword_items);
+    if (subItems.length) {
+      html += '<div class="source-subtask-items-wrap">' + renderSourceSubtaskItems(subItems, task, sid) + '</div>';
+    }
+    html += '</div>';
+  });
+  if (running && task && task.id) {
+    let topBtns = '<div class="btn-group" style="margin-bottom:12px">'
+      + '<button type="button" class="btn btn-red btn-sm" onclick="stopTaskById(' + task.id + ',\'all\')">终止任务</button>';
+    if ((task.sources || []).length > 1) {
+      topBtns += '<button type="button" class="btn btn-orange btn-sm" onclick="pauseTaskById(' + task.id + ',\'all\')">暂停全部源</button>';
+    }
+    topBtns += '</div>';
+    html = topBtns + html;
+  }
+  return html;
+}
+
+function renderRunLogsSection(logs) {
+  logs = logs || [];
+  if (!logs.length) {
+    return '<div class="run-detail-section"><h4>执行日志</h4><p class="muted">暂无日志</p></div>';
+  }
+  const lines = logs.slice().reverse().map(function(l) {
+    const lvl = l.level || 'INFO';
+    const worker = l.worker_instance_id
+      ? ' <span class="meta">' + esc(l.worker_instance_id) + '</span>' : '';
+    return '<div class="log-line"><span class="log-time">' + fmtTime(l.created_at) + '</span>'
+      + ' <span class="log-level ' + esc(lvl) + '">[' + esc(lvl) + ']</span>'
+      + worker
+      + ' <span class="log-msg">' + esc(l.message || '') + '</span></div>';
+  }).join('');
+  return '<div class="run-detail-section"><h4>执行日志</h4>'
+    + '<div class="logs scroll" style="max-height:280px;border:1px solid var(--border);border-radius:6px">' + lines + '</div></div>';
+}
+
+async function retryFailedKeywords(taskId, keywordRunIds) {
+  if (!keywordRunIds || !keywordRunIds.length) return;
+  if (!confirm('重跑 ' + keywordRunIds.length + ' 个失败的 keyword 子任务？')) return;
+  let d;
+  try {
+    d = await api('/api/monitor/retry-keywords', {
+      method: 'POST',
+      body: JSON.stringify({ task_id: taskId, keyword_run_ids: keywordRunIds, analyze_mode: 'incremental' }),
+    });
+  } catch (e) {
+    toastMsg(e.message || '重跑失败', true);
+    return;
+  }
+  if (!d.ok) { toastMsg(d.msg || '重跑失败', true); return; }
+  toastMsg('已启动 keyword 重跑');
+  loadTasks();
+}
+
+function buildRunDetailHtml(run, task, keywords) {
   const totalMs = (run.crawl_duration_ms || 0) + (run.analyze_duration_ms || 0);
   let html = '<div class="run-detail-drawer">';
   html += '<div class="run-detail-overview">'
@@ -531,6 +1659,7 @@ function buildRunDetailHtml(run, task) {
   html += '<h4 class="run-detail-section">统计指标</h4>' + renderRunDetailStats(run.stats);
   html += '<h4 class="run-detail-section">分源耗时</h4>' + renderRunDetailTiming(run.timing_by_source);
   html += '<h4 class="run-detail-section">Token 用量</h4>' + renderRunDetailToken(run.token_usage);
+  html += '<h4 class="run-detail-section">Keyword 子任务</h4>' + renderKeywordSubtasks(keywords || [], run, task);
   html += renderRunDetailGlossary();
   html += '</div>';
   return html;
@@ -548,19 +1677,29 @@ async function openRunDrawer(runId, taskId) {
   if (!d.ok || !d.run) { toastMsg(d.msg || '加载失败', true); return; }
   const resolvedTaskId = taskId || d.run.task_id;
   const task = tasks.find(function(x) { return x.id === resolvedTaskId; });
+  let keywords = [];
+  try {
+    const kd = await api('/api/monitor/runs/' + runId + '/keywords');
+    if (kd.ok) keywords = kd.keywords || [];
+  } catch (e) { /* ignore */ }
   selectedRunId = runId;
   selectedRunTaskId = resolvedTaskId;
   renderTaskTable();
-  App.setQuery({ tab: 'tasks', run_id: runId, task_id: resolvedTaskId || null }, true);
+  const qPatch = { tab: 'tasks', run_id: runId, task_id: resolvedTaskId || null };
+  if (App.getQuery('monitor_task_id')) qPatch.monitor_task_id = App.getQuery('monitor_task_id');
+  if (App.getQuery('task_tab')) qPatch.task_tab = App.getQuery('task_tab');
+  App.setQuery(qPatch, true);
   UiShell.drawer({
     title: 'Run #' + runId + (task && task.name ? ' · ' + task.name : ''),
-    bodyHtml: buildRunDetailHtml(d.run, task),
+    bodyHtml: buildRunDetailHtml(d.run, task, keywords),
     width: '720px',
     onClose: function() {
       selectedRunId = null;
       selectedRunTaskId = null;
       renderTaskTable();
-      App.setQuery({ run_id: null }, true);
+      const closePatch = { run_id: null };
+      if (!App.getQuery('monitor_task_id')) closePatch.task_id = null;
+      App.setQuery(closePatch, true);
     },
   });
 }
@@ -676,6 +1815,805 @@ function renderRunHistoryContent(taskId) {
     + '</tr></thead><tbody>' + rows + '</tbody></table></div>' + footer;
 }
 
+let taskDetailState = {
+  taskId: null,
+  task: null,
+  taskTab: 'overview',
+  runs: [],
+  runsTotal: 0,
+  runsPage: 0,
+  runsLoading: false,
+  subtaskRunId: null,
+};
+
+function showTaskListView() {
+  const list = document.getElementById('taskListView');
+  const detail = document.getElementById('taskDetailView');
+  if (list) list.style.display = '';
+  if (detail) detail.style.display = 'none';
+}
+
+function showTaskDetailView() {
+  const list = document.getElementById('taskListView');
+  const detail = document.getElementById('taskDetailView');
+  if (list) list.style.display = 'none';
+  if (detail) detail.style.display = '';
+}
+
+function backToTaskList() {
+  App.setQuery({ monitor_task_id: null, task_tab: null, run_id: null, task_id: null }, true);
+  showTaskListView();
+  loadTasks();
+}
+
+function crawlModeLabel(mode) {
+  return mode === 'list_first' ? '列表优先' : 'Legacy';
+}
+
+function formatTaskScheduleSummary(task) {
+  const sched = (task && task.schedule) || {};
+  if (!sched.enabled) return '未启用';
+  const bits = ['已启用'];
+  if (task.next_run_at) bits.push('下次 ' + fmtTime(task.next_run_at));
+  if (sched.cron) bits.push('cron ' + sched.cron);
+  if (sched.timezone) bits.push(sched.timezone);
+  return bits.join(' · ');
+}
+
+function renderTaskDetailHeader() {
+  const t = taskDetailState.task;
+  const title = document.getElementById('taskDetailTitle');
+  const tags = document.getElementById('taskDetailTags');
+  if (!t || !title) return;
+  title.textContent = (t.name || '未命名任务') + ' #' + t.id;
+  if (!tags) return;
+  const bits = [statusTag(t.status)];
+  (t.sources || []).forEach(function(s) { bits.push(sourceTag(s)); });
+  bits.push('<span class="tag tag-medium">' + esc(crawlModeLabel(t.crawl_mode)) + '</span>');
+  if (t.schedule && t.schedule.enabled) bits.push('<span class="tag tag-on">定时</span>');
+  tags.innerHTML = bits.join('');
+}
+
+function renderTaskDetailActionBar() {
+  const bar = document.getElementById('taskDetailActionBar');
+  const t = taskDetailState.task;
+  if (!bar || !t) return;
+  const running = ['crawling', 'analyzing'].includes(t.status);
+  const srcs = t.sources || [];
+  let controlGroup = '';
+  if (running && srcs.length > 1) {
+    controlGroup = '<span class="task-action-group-label">运行</span>'
+      + srcs.map(function(s) {
+        return '<button type="button" class="btn btn-orange btn-sm" onclick="pauseTaskById(' + t.id + ',' + jsAttrStr(s) + ')">暂停' + esc(sourceLabel(s)) + '</button>';
+      }).join(' ')
+      + '<button type="button" class="btn btn-orange btn-sm" onclick="pauseTaskById(' + t.id + ',\'all\')">暂停全部</button>'
+      + '<button type="button" class="btn btn-red btn-sm" onclick="stopTaskById(' + t.id + ',\'all\')">终止</button>';
+  } else if (running) {
+    controlGroup = ''
+      + (t.can_pause ? '<button type="button" class="btn btn-orange btn-sm" onclick="pauseTaskById(' + t.id + ',\'all\')">暂停</button>' : '')
+      + (t.can_stop ? '<button type="button" class="btn btn-red btn-sm" onclick="stopTaskById(' + t.id + ',\'all\')">终止</button>' : '');
+  }
+  const runGroup = ''
+    + (t.can_resume ? '<button type="button" class="btn btn-primary btn-sm" onclick="resumeTaskById(' + t.id + ')" title="继续未完成子任务">继续 (' + (t.incomplete_subtasks || 0) + ')</button>' : '')
+    + '<button type="button" class="btn btn-primary btn-sm" onclick="runTaskById(' + t.id + ')" '
+    + (!t.can_run ? 'disabled' : '') + ' title="' + esc(t.run_block_reason || '增量爬取+分析') + '">执行</button>';
+  const manageGroup = ''
+    + '<button type="button" class="btn btn-orange btn-sm" onclick="reanalyzeIncremental(' + t.id + ')" '
+    + (!t.can_reanalyze ? 'disabled' : '') + '>增量 AI</button>'
+    + '<button type="button" class="btn btn-orange btn-sm" onclick="reanalyzeFull(' + t.id + ')" '
+    + (!t.can_reanalyze ? 'disabled' : '') + '>全量 AI</button>'
+    + '<button type="button" class="btn btn-gray btn-sm" onclick="editTask(' + t.id + ')" '
+    + (running ? 'disabled' : '') + '>编辑</button>'
+    + '<button type="button" class="btn btn-gray btn-sm admin-only-save" onclick="openPurgeModal({taskId:' + t.id + '})">清理</button>'
+    + '<button type="button" class="btn btn-gray btn-sm" onclick="deleteTask(' + t.id + ')" '
+    + (running ? 'disabled' : '') + '>删除</button>'
+    + '<button type="button" class="btn btn-gray btn-sm" onclick="loadTaskDetail(true)">刷新</button>';
+  const groups = [];
+  if (controlGroup) {
+    groups.push('<div class="task-action-group task-action-group-control">' + controlGroup + '</div>');
+  }
+  groups.push('<div class="task-action-group task-action-group-primary">' + runGroup + '</div>');
+  groups.push('<div class="task-action-group task-action-group-muted">' + manageGroup + '</div>');
+  bar.innerHTML = '<div class="task-action-groups">' + groups.join('') + '</div>';
+}
+
+function renderTaskDetailProgressHero(t) {
+  const prog = t.progress || {};
+  if (!prog.phase && !(prog.subtasks && prog.subtasks.total) && !prog.current_keyword) {
+    return '<div class="task-detail-progress-hero"><span class="hero-label">执行进度</span><span class="hero-extra">暂无进行中的 Run</span></div>';
+  }
+  let extras = [];
+  if (prog.subtasks && prog.subtasks.total) {
+    extras.push('keyword ' + (prog.subtasks.done || 0) + '/' + prog.subtasks.total);
+    if (prog.subtasks.failed) extras.push('失败 ' + prog.subtasks.failed);
+    if (prog.subtasks.running) extras.push('运行 ' + prog.subtasks.running);
+  }
+  if (prog.current_keyword) extras.push('当前 ' + prog.current_keyword);
+  return '<div class="task-detail-progress-hero">'
+    + '<span class="hero-label">执行进度</span>'
+    + '<span class="hero-phase">' + esc(phaseLabel(prog.phase || 'pending')) + '</span>'
+    + (extras.length ? '<span class="hero-extra">' + esc(extras.join(' · ')) + '</span>' : '')
+    + '</div>';
+}
+
+function renderTaskDetailMetricCards(t) {
+  const lr = t.last_run;
+  let lastRunHtml = '<div class="task-detail-metric"><span class="metric-label">最近 Run</span>'
+    + '<span class="metric-value muted">—</span></div>';
+  if (lr) {
+    const totalMs = (lr.crawl_duration_ms || 0) + (lr.analyze_duration_ms || 0);
+    lastRunHtml = '<button type="button" class="task-detail-metric is-link" onclick="openRunDrawer(' + lr.id + ',' + t.id + ')">'
+      + '<span class="metric-label">最近 Run</span>'
+      + '<span class="metric-value">#' + lr.id + ' ' + (lr.status === 'done' ? '完成' : (lr.status === 'failed' ? '失败' : lr.status)) + '</span>'
+      + '<span class="metric-meta">' + esc(runTriggerLabel(lr.trigger)) + ' · ' + fmtDuration(totalMs) + ' · ' + fmtTime(lr.finished_at || lr.started_at) + '</span>'
+      + '</button>';
+  }
+  return '<div class="task-detail-metrics">'
+    + '<div class="task-detail-metric"><span class="metric-label">源数据</span><span class="metric-value">' + (t.raw_count || 0) + '</span></div>'
+    + '<div class="task-detail-metric"><span class="metric-label">情报</span><span class="metric-value">' + (t.intel_count || 0) + '</span></div>'
+    + lastRunHtml
+    + '</div>';
+}
+
+function renderTaskSourceProgressCard(src) {
+  const q = src.queue || {};
+  const k = src.keywords || {};
+  const tw = src.timing || {};
+  const aw = src.active_work;
+  const statusClass = src.status === 'failed' ? 'is-failed'
+    : (src.status === 'running' ? 'is-running' : (src.status === 'done' ? 'is-done' : ''));
+  const subItems = src.subtask_items || [];
+  let subCrawl = 0;
+  let subInvest = 0;
+  let subAnalyze = 0;
+  subItems.forEach(function(it) {
+    const pt = it.phase_timing_ms || {};
+    subCrawl += pt.list_crawl_ms || 0;
+    subInvest += pt.investigation_ms || 0;
+    subAnalyze += pt.analyze_ms || 0;
+  });
+  const crawlMs = Math.max(tw.crawl_ms || 0, subCrawl);
+  const investMs = Math.max(tw.investigation_crawl_ms || 0, subInvest);
+  const analyzeMs = Math.max(tw.analyze_ms || 0, subAnalyze);
+  let metrics = [];
+  if (q.total) metrics.push('<span>队列 <strong>' + (q.done || 0) + '/' + q.total + '</strong></span>');
+  if (q.failed) metrics.push('<span>失败 <strong>' + q.failed + '</strong></span>');
+  if (k.total) metrics.push('<span>关键词 <strong>' + (k.done || 0) + '/' + k.total + '</strong></span>');
+  if (src.halt) {
+    metrics.push('<span>' + esc(src.halt === 'pause' ? '已请求暂停' : '已请求终止') + '</span>');
+  }
+  let timingHtml = '';
+  if (crawlMs || investMs || analyzeMs) {
+    timingHtml = '<div class="task-source-card-timing">'
+      + '<div class="timing-row"><span class="timing-label">累计</span>'
+      + '<span>爬取 ' + fmtDuration(crawlMs) + '</span>'
+      + '<span>勘察 ' + fmtDuration(investMs) + '</span>'
+      + '<span>分析 ' + fmtDuration(analyzeMs) + '</span></div>';
+    if (aw && aw.phase) {
+      timingHtml += '<div class="timing-row"><span class="timing-label">当前</span>'
+        + '<span><strong>' + esc(phaseLabel(aw.phase)) + '</strong>'
+        + ' · ' + fmtDuration(aw.elapsed_ms || 0)
+        + (aw.label ? ' · ' + esc(aw.label) : '') + '</span></div>';
+    }
+    timingHtml += '</div>';
+  }
+  const phaseTable = renderSourcePhaseTable(src);
+  return '<div class="task-source-card ' + statusClass + '" data-source-id="' + esc(src.source_id) + '">'
+    + '<div class="task-source-card-head">'
+    + '<div class="task-source-card-title">' + sourceTag(src.source_id) + sourceSubtaskStatusTag(src.status) + '</div>'
+    + '</div>'
+    + (metrics.length ? '<div class="task-source-card-metrics">' + metrics.join('') + '</div>' : '')
+    + timingHtml
+    + phaseTable
+    + '</div>';
+}
+
+function renderTaskDetailOverview() {
+  const box = document.getElementById('taskDetailOverviewBody');
+  const t = taskDetailState.task;
+  if (!box || !t) return;
+  const bs = t.business_spec || {};
+  const partnerLinks = (t.partner_ids || []).map(function(pid) {
+    const name = partnerName(pid);
+    return '<button type="button" class="btn btn-gray btn-sm" onclick="App.navigatePartnerDetail(' + pid + ')">' + esc(name) + '</button>';
+  }).join(' ') || '<span class="muted">—</span>';
+
+  box.innerHTML = ''
+    + '<div class="task-detail-overview">'
+    + '<div class="task-detail-panel">'
+    + '<div class="task-detail-panel-head"><div><h3 class="task-detail-panel-title">执行状态</h3>'
+    + '<div class="task-detail-panel-sub">各数据源当前 Run 的队列、阶段与耗时</div></div></div>'
+    + '<div class="task-detail-progress-hero-wrap">' + renderTaskDetailProgressHero(t) + '</div>'
+    + renderTaskDetailMetricCards(t)
+    + renderTaskDetailSourceProgress(t)
+    + (t.error_message ? ('<div style="margin-top:12px">' + renderRunDetailError(t.error_message) + '</div>') : '')
+    + '</div>'
+    + '<div class="task-detail-panel">'
+    + '<div class="task-detail-panel-head"><div><h3 class="task-detail-panel-title">任务配置</h3>'
+    + '<div class="task-detail-panel-sub">采集范围、模式与合作方</div></div></div>'
+    + '<div class="task-detail-kv-grid">'
+    + '<div class="run-detail-kv"><span class="k">任务 ID</span><span class="v">#' + t.id + '</span></div>'
+    + '<div class="run-detail-kv"><span class="k">采集页数</span><span class="v">' + (t.max_pages || '-') + '</span></div>'
+    + '<div class="run-detail-kv"><span class="k">黑猫模式</span><span class="v">' + esc(crawlModeLabel(t.crawl_mode)) + '</span></div>'
+    + '<div class="run-detail-kv"><span class="k">Legacy 抓详情</span><span class="v">' + (t.fetch_detail ? '是' : '否') + '</span></div>'
+    + '<div class="run-detail-kv"><span class="k">忽略早于</span><span class="v">' + esc(bs.ignore_before || '—') + '</span></div>'
+    + '<div class="run-detail-kv"><span class="k">定时</span><span class="v">' + esc(formatTaskScheduleSummary(t)) + '</span></div>'
+    + '<div class="run-detail-kv"><span class="k">创建</span><span class="v">' + fmtTime(t.created_at) + '</span></div>'
+    + '<div class="run-detail-kv"><span class="k">更新</span><span class="v">' + fmtTime(t.updated_at) + '</span></div>'
+    + '</div>'
+    + '<div class="task-detail-config-block">'
+    + '<div class="task-detail-config-row"><span class="config-row-label">来源</span>'
+    + ((t.sources || []).map(function(s) { return sourceTag(s); }).join(' ') || '<span class="muted">—</span>') + '</div>'
+    + '<div class="task-detail-config-row"><span class="config-row-label">合作方</span>'
+    + '<div class="task-detail-partners">' + partnerLinks + '</div></div>'
+    + '</div>'
+    + '</div>'
+    + '</div>';
+}
+
+function showTaskDetailPane(tab) {
+  taskDetailState.taskTab = tab;
+  document.querySelectorAll('.task-subtabs .tab').forEach(function(el) {
+    el.classList.toggle('active', el.getAttribute('data-task-tab') === tab);
+  });
+  const panes = {
+    overview: 'taskOverviewPane',
+    runs: 'taskRunsPane',
+    subtasks: 'taskSubtasksPane',
+    raw: 'taskRawPane',
+    intel: 'taskIntelPane',
+  };
+  Object.keys(panes).forEach(function(key) {
+    const el = document.getElementById(panes[key]);
+    if (el) el.style.display = key === tab ? '' : 'none';
+  });
+}
+
+function switchTaskSubTab(tab, linkEl) {
+  showTaskDetailPane(tab);
+  App.setQuery({ task_tab: tab }, true);
+  if (tab === 'runs') loadTaskDetailRuns(true);
+  else if (tab === 'subtasks') loadTaskDetailSubtasks(true);
+  else if (tab === 'raw') loadTaskDetailRaw();
+  else if (tab === 'intel') loadTaskDetailIntel();
+  else renderTaskDetailOverview();
+}
+
+async function loadTaskDetailRuns(reset) {
+  const taskId = taskDetailState.taskId;
+  const box = document.getElementById('taskDetailRunsBody');
+  if (!taskId || !box) return;
+  if (reset) {
+    taskDetailState.runs = [];
+    taskDetailState.runsPage = 0;
+    taskDetailState.runsTotal = 0;
+  }
+  if (taskDetailState.runsLoading) return;
+  taskDetailState.runsLoading = true;
+  box.innerHTML = '<p class="meta">加载中…</p>';
+  const page = reset ? 1 : taskDetailState.runsPage + 1;
+  try {
+    const d = await api('/api/monitor/tasks/' + taskId + '/runs?page=' + page + '&limit=' + RUN_HISTORY_LIMIT);
+    if (!d.ok) throw new Error(d.msg || '加载失败');
+    taskDetailState.runsPage = page;
+    taskDetailState.runsTotal = d.total || 0;
+    const newRuns = d.runs || [];
+    taskDetailState.runs = reset ? newRuns : taskDetailState.runs.concat(newRuns);
+    if (!taskDetailState.runs.length) {
+      box.innerHTML = '<p class="muted">暂无执行记录</p>';
+      return;
+    }
+    const rows = taskDetailState.runs.map(function(r) {
+      return renderRunSummaryRow(r, taskId);
+    }).join('');
+    const hasMore = taskDetailState.runs.length < taskDetailState.runsTotal;
+    const footer = hasMore
+      ? '<div class="run-history-footer"><span class="meta">已加载 ' + taskDetailState.runs.length + ' / ' + taskDetailState.runsTotal + '</span>'
+        + '<button type="button" class="btn btn-gray btn-sm" onclick="loadTaskDetailRuns(false)">加载更多</button></div>'
+      : '<div class="run-history-footer"><span class="meta">共 ' + taskDetailState.runsTotal + ' 条</span></div>';
+    box.innerHTML = '<div class="run-history-scroll"><table class="run-summary-table"><thead><tr>'
+      + '<th>Run</th><th>开始</th><th>触发</th><th>模式</th><th>状态</th><th>耗时</th>'
+      + renderRunHistoryStatHeaders()
+      + '</tr></thead><tbody>' + rows + '</tbody></table></div>' + footer;
+  } catch (e) {
+    box.innerHTML = '<p class="msg-err">' + esc(e.message) + '</p>';
+  } finally {
+    taskDetailState.runsLoading = false;
+  }
+}
+
+async function loadTaskDetailSubtaskRunOptions() {
+  const sel = document.getElementById('taskDetailSubtaskRun');
+  if (!sel || !taskDetailState.taskId) return false;
+  const taskId = taskDetailState.taskId;
+  try {
+    const d = await api('/api/monitor/tasks/' + taskId + '/runs?page=1&limit=' + SUBTASK_RUN_LIMIT);
+    if (d.ok && d.runs) {
+      taskDetailState.runs = d.runs;
+      taskDetailState.runsTotal = d.total || d.runs.length;
+      taskDetailState.runsPage = 1;
+    }
+  } catch (e) {
+    if (!taskDetailState.runs.length) await loadTaskDetailRuns(true);
+  }
+  const t = taskDetailState.task;
+  const extraRunIds = [];
+  if (t) {
+    if (t.progress && t.progress.run_id) extraRunIds.push(parseInt(t.progress.run_id, 10));
+    if (t.last_run_id) extraRunIds.push(parseInt(t.last_run_id, 10));
+    if (t.resume_run_id) extraRunIds.push(parseInt(t.resume_run_id, 10));
+  }
+  const existing = new Set((taskDetailState.runs || []).map(function(r) { return r.id; }));
+  for (let i = 0; i < extraRunIds.length; i++) {
+    const rid = extraRunIds[i];
+    if (!rid || existing.has(rid)) continue;
+    try {
+      const rd = await api('/api/monitor/runs/' + rid);
+      if (rd.ok && rd.run) {
+        taskDetailState.runs.unshift(rd.run);
+        existing.add(rid);
+      }
+    } catch (e) { /* ignore */ }
+  }
+  taskDetailState.runs.sort(function(a, b) { return b.id - a.id; });
+  const runs = taskDetailState.runs || [];
+  sel.innerHTML = runs.map(function(r) {
+    return '<option value="' + r.id + '">Run #' + r.id + ' · ' + esc(r.status || '') + ' · ' + fmtTime(r.started_at) + '</option>';
+  }).join('');
+  const preferred = taskDetailState.subtaskRunId
+    || (t && t.progress && t.progress.run_id)
+    || (t && t.last_run_id)
+    || (runs[0] && runs[0].id);
+  if (preferred && runs.some(function(r) { return r.id === parseInt(preferred, 10); })) {
+    sel.value = String(preferred);
+    taskDetailState.subtaskRunId = parseInt(preferred, 10);
+  } else if (runs[0]) {
+    sel.value = String(runs[0].id);
+    taskDetailState.subtaskRunId = runs[0].id;
+  }
+  return !!runs.length;
+}
+
+function onTaskDetailSubtaskRunChange() {
+  const sel = document.getElementById('taskDetailSubtaskRun');
+  const box = document.getElementById('taskDetailSubtasksBody');
+  if (!sel || !sel.value) return;
+  taskDetailState.subtaskRunId = parseInt(sel.value, 10);
+  if (box) {
+    box.innerHTML = '<p class="meta">已选择 Run #' + esc(sel.value) + '，点击「刷新」加载子任务详情</p>';
+  }
+}
+
+async function loadTaskDetailSubtasks(resetToLatest) {
+  const box = document.getElementById('taskDetailSubtasksBody');
+  const sel = document.getElementById('taskDetailSubtaskRun');
+  if (!box || !taskDetailState.taskId) return;
+  if (resetToLatest) taskDetailState.subtaskRunId = null;
+  box.innerHTML = '<p class="meta">加载中…</p>';
+  const hasRuns = await loadTaskDetailSubtaskRunOptions();
+  const runId = sel && sel.value ? parseInt(sel.value, 10) : null;
+  if (!hasRuns || !runId) {
+    box.innerHTML = '<p class="muted">暂无执行记录</p>';
+    return;
+  }
+  taskDetailState.subtaskRunId = runId;
+  box.innerHTML = '<p class="meta">加载中…</p>';
+  try {
+    const [kd, rd] = await Promise.all([
+      api('/api/monitor/runs/' + runId + '/subtasks'),
+      api('/api/monitor/runs/' + runId + '?log_limit=200'),
+    ]);
+    const sources = (kd.ok && kd.sources) ? kd.sources : [];
+    const logs = (rd.ok && rd.logs) ? rd.logs : [];
+    box.innerHTML = renderRunSubtasksBySource(sources, taskDetailState.task, runId)
+      + renderRunLogsSection(logs);
+  } catch (e) {
+    box.innerHTML = '<p class="msg-err">' + esc(e.message) + '</p>';
+  }
+}
+
+function taskDetailRawRowSignature(r) {
+  const summary = (r.title_summary || r.keyword || '').slice(0, 60);
+  return [
+    r.id, r.partner_id, r.source, r.keyword || '', summary,
+    r.created_at || '', r.analyze_status || '',
+  ].join('|');
+}
+
+function buildTaskDetailRawRowHtml(r) {
+  const summary = (r.title_summary || r.keyword || '').slice(0, 60);
+  const taskId = taskDetailState.taskId;
+  return '<tr class="clickable-row" data-raw-id="' + r.id + '" onclick="App.setQuery({tab:\'raw\',raw_id:' + r.id + ',task_id:' + taskId + '});App.switchAppTab(\'raw\')">'
+    + '<td data-field="id">' + r.id + '</td>'
+    + '<td data-field="partner">' + esc(partnerName(r.partner_id)) + '</td>'
+    + '<td data-field="source">' + sourceTag(r.source) + '</td>'
+    + '<td class="truncate" data-field="keyword">' + esc(r.keyword || '-') + '</td>'
+    + '<td class="truncate" data-field="summary" title="' + esc(summary) + '">' + esc(summary) + '</td>'
+    + '<td data-field="created">' + fmtTime(r.created_at) + '</td>'
+    + '<td data-field="analyze">' + esc(r.analyze_status || '-') + '</td></tr>';
+}
+
+function patchTaskDetailRawRow(row, r) {
+  const summary = (r.title_summary || r.keyword || '').slice(0, 60);
+  const setField = function(field, html) {
+    const el = row.querySelector('[data-field="' + field + '"]');
+    if (el && el.innerHTML !== html) el.innerHTML = html;
+  };
+  setField('id', String(r.id));
+  setField('partner', esc(partnerName(r.partner_id)));
+  setField('source', sourceTag(r.source));
+  setField('keyword', esc(r.keyword || '-'));
+  setField('summary', esc(summary));
+  const sumEl = row.querySelector('[data-field="summary"]');
+  if (sumEl) sumEl.setAttribute('title', summary);
+  setField('created', fmtTime(r.created_at));
+  setField('analyze', esc(r.analyze_status || '-'));
+}
+
+function taskDetailIntelRowSignature(r) {
+  return [
+    r.id, r.partner_name || '', r.source || '', r.relevance || '',
+    r.sentiment_label || '', r.sentiment_score != null ? r.sentiment_score : '',
+    (r.summary || r.title || '').slice(0, 60), r.captured_at || '',
+  ].join('|');
+}
+
+function buildTaskDetailIntelRowHtml(r) {
+  const taskId = taskDetailState.taskId;
+  return '<tr class="clickable-row" data-intel-id="' + r.id + '" onclick="App.setQuery({tab:\'intel\',intel_id:' + r.id + ',task_id:' + taskId + '});App.switchAppTab(\'intel\')">'
+    + '<td data-field="partner">' + esc(r.partner_name || '-') + '</td>'
+    + '<td data-field="source">' + sourceTag(r.source) + '</td>'
+    + '<td data-field="relevance">' + relTag(r.relevance) + '</td>'
+    + '<td data-field="sentiment">' + sentimentTag(r.sentiment_label, r.sentiment_score) + '</td>'
+    + '<td class="truncate" data-field="summary">' + esc((r.summary || r.title || '').slice(0, 60)) + '</td>'
+    + '<td data-field="captured">' + fmtTime(r.captured_at) + '</td>'
+    + '<td class="actions" data-field="actions" onclick="event.stopPropagation()">'
+    + '<button type="button" class="btn btn-gray btn-sm" onclick="App.setQuery({tab:\'intel\',intel_id:' + r.id + '});App.switchAppTab(\'intel\')">详情</button>'
+    + '</td></tr>';
+}
+
+function patchTaskDetailIntelRow(row, r) {
+  const setField = function(field, html) {
+    const el = row.querySelector('[data-field="' + field + '"]');
+    if (el && el.innerHTML !== html) el.innerHTML = html;
+  };
+  setField('partner', esc(r.partner_name || '-'));
+  setField('source', sourceTag(r.source));
+  setField('relevance', relTag(r.relevance));
+  setField('sentiment', sentimentTag(r.sentiment_label, r.sentiment_score));
+  setField('summary', esc((r.summary || r.title || '').slice(0, 60)));
+  setField('captured', fmtTime(r.captured_at));
+}
+
+function syncTaskDetailTableBody(body, rows, opts) {
+  const scrollEl = body.closest('.table-wrap');
+  const scrollTop = scrollEl ? scrollEl.scrollTop : 0;
+  const idKey = opts.idKey;
+  const sigStore = opts.sigStore;
+  const emptyHtml = opts.emptyHtml;
+
+  if (!rows.length) {
+    if (!body.querySelector('tr[' + idKey + ']')) {
+      if (body.innerHTML !== emptyHtml) body.innerHTML = emptyHtml;
+    } else {
+      body.innerHTML = emptyHtml;
+      Object.keys(sigStore).forEach(function(k) { delete sigStore[k]; });
+    }
+    return;
+  }
+
+  if (body.querySelector('.empty') && !body.querySelector('tr[' + idKey + ']')) {
+    body.innerHTML = '';
+  }
+
+  const seen = new Set();
+  let prev = null;
+  let prependHeight = 0;
+
+  rows.forEach(function(r) {
+    const id = String(opts.getId(r));
+    seen.add(id);
+    const sig = opts.rowSig(r);
+    let row = body.querySelector('tr[' + idKey + '="' + id + '"]');
+
+    if (!row) {
+      const tmp = document.createElement('tbody');
+      tmp.innerHTML = opts.buildRow(r);
+      row = tmp.querySelector('tr');
+      if (prev) {
+        prev.insertAdjacentElement('afterend', row);
+      } else if (body.firstElementChild) {
+        body.insertBefore(row, body.firstElementChild);
+        prependHeight += row.offsetHeight || 0;
+      } else {
+        body.appendChild(row);
+      }
+      sigStore[id] = sig;
+    } else {
+      if (sigStore[id] !== sig) {
+        opts.patchRow(row, r);
+        sigStore[id] = sig;
+      }
+      if (prev && row.previousElementSibling !== prev) {
+        prev.insertAdjacentElement('afterend', row);
+      }
+    }
+    prev = row;
+  });
+
+  body.querySelectorAll('tr[' + idKey + ']').forEach(function(row) {
+    const id = row.getAttribute(idKey);
+    if (!seen.has(id)) {
+      row.remove();
+      delete sigStore[id];
+    }
+  });
+
+  if (scrollEl) scrollEl.scrollTop = scrollTop + prependHeight;
+}
+
+function syncTaskDetailRawTable(rows, total) {
+  const body = document.getElementById('taskDetailRawBody');
+  const countEl = document.getElementById('taskDetailRawCount');
+  if (!body) return;
+  const countText = '(共 ' + (total || rows.length) + ' 条)';
+  if (countEl && countEl.textContent !== countText) countEl.textContent = countText;
+  syncTaskDetailTableBody(body, rows, {
+    idKey: 'data-raw-id',
+    getId: function(r) { return r.id; },
+    rowSig: taskDetailRawRowSignature,
+    sigStore: taskDetailRawRowSigs,
+    buildRow: buildTaskDetailRawRowHtml,
+    patchRow: patchTaskDetailRawRow,
+    emptyHtml: '<tr><td colspan="7" class="empty">暂无源数据</td></tr>',
+  });
+}
+
+function syncTaskDetailIntelTable(rows, total) {
+  const body = document.getElementById('taskDetailIntelBody');
+  const countEl = document.getElementById('taskDetailIntelCount');
+  if (!body) return;
+  const countText = '(中及以上 ' + (total || rows.length) + ' 条)';
+  if (countEl && countEl.textContent !== countText) countEl.textContent = countText;
+  syncTaskDetailTableBody(body, rows, {
+    idKey: 'data-intel-id',
+    getId: function(r) { return r.id; },
+    rowSig: taskDetailIntelRowSignature,
+    sigStore: taskDetailIntelRowSigs,
+    buildRow: buildTaskDetailIntelRowHtml,
+    patchRow: patchTaskDetailIntelRow,
+    emptyHtml: '<tr><td colspan="7" class="empty">暂无情报</td></tr>',
+  });
+}
+
+async function refreshTaskDetailRawOnly() {
+  if (!taskDetailState.taskId) return;
+  const body = document.getElementById('taskDetailRawBody');
+  if (!body) return;
+  try {
+    const p = new URLSearchParams({ task_id: String(taskDetailState.taskId), page_size: '100' });
+    const d = await api('/api/raw/records?' + p.toString());
+    syncTaskDetailRawTable(d.records || [], d.total);
+  } catch (e) { /* ignore background refresh errors */ }
+}
+
+async function refreshTaskDetailIntelOnly() {
+  if (!taskDetailState.taskId) return;
+  const body = document.getElementById('taskDetailIntelBody');
+  if (!body) return;
+  try {
+    const p = new URLSearchParams({
+      task_id: String(taskDetailState.taskId),
+      relevance_min: 'medium',
+      page_size: '100',
+    });
+    const d = await api('/api/intel/records?' + p.toString());
+    syncTaskDetailIntelTable(d.records || [], d.total);
+  } catch (e) { /* ignore background refresh errors */ }
+}
+
+async function loadTaskDetailRaw(refreshOnly) {
+  const body = document.getElementById('taskDetailRawBody');
+  if (!body || !taskDetailState.taskId) return;
+  const hasRows = !!body.querySelector('tr[data-raw-id]');
+  if (!refreshOnly || !hasRows) {
+    body.innerHTML = '<tr><td colspan="7" class="empty">加载中…</td></tr>';
+  }
+  try {
+    const p = new URLSearchParams({ task_id: String(taskDetailState.taskId), page_size: '100' });
+    const d = await api('/api/raw/records?' + p.toString());
+    if (refreshOnly && hasRows) {
+      syncTaskDetailRawTable(d.records || [], d.total);
+    } else {
+      taskDetailRawRowSigs = {};
+      syncTaskDetailRawTable(d.records || [], d.total);
+    }
+  } catch (e) {
+    if (!refreshOnly || !hasRows) {
+      body.innerHTML = '<tr><td colspan="7" class="msg-err">' + esc(e.message) + '</td></tr>';
+    }
+  }
+}
+
+async function loadTaskDetailIntel(refreshOnly) {
+  const body = document.getElementById('taskDetailIntelBody');
+  if (!body || !taskDetailState.taskId) return;
+  const hasRows = !!body.querySelector('tr[data-intel-id]');
+  if (!refreshOnly || !hasRows) {
+    body.innerHTML = '<tr><td colspan="7" class="empty">加载中…</td></tr>';
+  }
+  try {
+    const p = new URLSearchParams({
+      task_id: String(taskDetailState.taskId),
+      relevance_min: 'medium',
+      page_size: '100',
+    });
+    const d = await api('/api/intel/records?' + p.toString());
+    if (refreshOnly && hasRows) {
+      syncTaskDetailIntelTable(d.records || [], d.total);
+    } else {
+      taskDetailIntelRowSigs = {};
+      syncTaskDetailIntelTable(d.records || [], d.total);
+    }
+  } catch (e) {
+    if (!refreshOnly || !hasRows) {
+      body.innerHTML = '<tr><td colspan="7" class="msg-err">' + esc(e.message) + '</td></tr>';
+    }
+  }
+}
+
+async function loadTaskDetail(refreshOnly) {
+  const taskId = taskDetailState.taskId;
+  if (!taskId) return;
+  try {
+    const d = await api('/api/monitor/tasks/' + taskId);
+    if (!d.ok || !d.task) throw new Error(d.msg || '任务不存在');
+    taskDetailState.task = d.task;
+    const idx = tasks.findIndex(function(x) { return x.id === taskId; });
+    if (idx >= 0) tasks[idx] = d.task;
+    else tasks.push(d.task);
+    renderTaskDetailHeader();
+    renderTaskDetailActionBar();
+    if (taskDetailState.taskTab === 'overview') {
+      if (refreshOnly) patchTaskDetailOverviewProgress(d.task);
+      else renderTaskDetailOverview();
+    }
+    else if (taskDetailState.taskTab === 'runs') {
+      if (!refreshOnly) await loadTaskDetailRuns(true);
+    }
+    else if (taskDetailState.taskTab === 'subtasks') {
+      if (!refreshOnly) await loadTaskDetailSubtasks(false);
+    }
+    else if (taskDetailState.taskTab === 'raw') await loadTaskDetailRaw(!!refreshOnly);
+    else if (taskDetailState.taskTab === 'intel') await loadTaskDetailIntel(!!refreshOnly);
+  } catch (e) {
+    toastMsg(e.message || '加载任务详情失败', true);
+    if (!refreshOnly) backToTaskList();
+  }
+}
+
+async function openTaskDetail(taskId, taskTab) {
+  if (!partners.length) await loadPartners();
+  if (!sources.length) await loadSources();
+  showTaskDetailView();
+  taskDetailState = {
+    taskId: taskId,
+    task: null,
+    taskTab: taskTab || App.getQuery('task_tab') || 'overview',
+    runs: [],
+    runsTotal: 0,
+    runsPage: 0,
+    runsLoading: false,
+    subtaskRunId: null,
+  };
+  taskDetailRawRowSigs = {};
+  taskDetailIntelRowSigs = {};
+  App.setQuery({ tab: 'tasks', monitor_task_id: taskId, task_tab: taskDetailState.taskTab, run_id: null }, true);
+  showTaskDetailPane(taskDetailState.taskTab);
+  await loadTaskDetail(false);
+}
+
+function refreshTaskDetailIfOpen(taskId) {
+  if (taskDetailState.taskId !== taskId || !document.getElementById('taskDetailView') || !taskDetailState.task) return;
+  if (['subtasks', 'overview', 'raw', 'intel'].includes(taskDetailState.taskTab)) {
+    refreshTaskDetailHeaderOnly(taskId);
+    return;
+  }
+  loadTaskDetail(true);
+}
+
+async function refreshTaskDetailHeaderOnly(taskId) {
+  if (taskDetailState.taskId !== taskId || !document.getElementById('taskDetailView')) return;
+  try {
+    const d = await api('/api/monitor/tasks/' + taskId);
+    if (!d.ok || !d.task) return;
+    taskDetailState.task = d.task;
+    const idx = tasks.findIndex(function(x) { return x.id === taskId; });
+    if (idx >= 0) tasks[idx] = d.task;
+    else tasks.push(d.task);
+    renderTaskDetailHeader();
+    renderTaskDetailActionBar();
+    if (taskDetailState.taskTab === 'subtasks') {
+      patchSubtasksBodyFromProgress(d.task);
+    } else if (taskDetailState.taskTab === 'overview') {
+      patchTaskDetailOverviewProgress(d.task);
+    } else if (taskDetailState.taskTab === 'raw') {
+      await refreshTaskDetailRawOnly();
+    } else if (taskDetailState.taskTab === 'intel') {
+      await refreshTaskDetailIntelOnly();
+    }
+    updateTaskTable(false);
+  } catch (e) { /* ignore */ }
+}
+
+function patchSubtasksBodyFromProgress(task) {
+  const box = document.getElementById('taskDetailSubtasksBody');
+  if (!box || !task) return;
+  const runId = taskDetailState.subtaskRunId;
+  const progRunId = task.progress && task.progress.run_id;
+  if (!runId || !progRunId || parseInt(progRunId, 10) !== runId) return;
+  const sources = (task.progress && task.progress.sources) || [];
+  if (!sources.length || !box.querySelector('.source-subtask-block')) return;
+  sources.forEach(function(src) {
+    const block = box.querySelector('.source-subtask-block[data-source-id="' + src.source_id + '"]');
+    if (!block) return;
+    const statusWrap = block.querySelector('.source-status-wrap');
+    if (statusWrap) {
+      const html = sourceTag(src.source_id) + ' ' + sourceSubtaskStatusTag(src.status)
+        + (src.halt ? ' <span class="meta">(' + esc(src.halt === 'pause' ? '已请求暂停' : '已请求终止') + ')</span>' : '');
+      if (statusWrap.innerHTML !== html) statusWrap.innerHTML = html;
+    }
+    const summary = block.querySelector('.source-summary-wrap');
+    if (summary) {
+      const html = renderSourceQueueSummary(src.queue || {})
+        + ((src.keywords && src.keywords.total) ? ' · ' + renderSourceKeywordSummary(src.keywords) : '');
+      if (summary.innerHTML !== html) summary.innerHTML = html;
+    }
+    const timing = block.querySelector('.source-timing-block');
+    if (timing) {
+      const html = renderSourceTimingBlock(src);
+      if (timing.innerHTML !== html) timing.innerHTML = html;
+    }
+    const itemsWrap = block.querySelector('.source-subtask-items-wrap');
+    const subItems = src.subtask_items && src.subtask_items.length
+      ? src.subtask_items
+      : normalizeLegacyKeywordItems(src.keyword_items);
+    if (itemsWrap && subItems.length) {
+      const html = renderSourceSubtaskItems(subItems, task, src.source_id);
+      if (itemsWrap.innerHTML !== html) itemsWrap.innerHTML = html;
+    }
+  });
+}
+
+function patchTaskDetailOverviewProgress(task) {
+  const box = document.getElementById('taskDetailOverviewBody');
+  if (!box || !task) return;
+  const heroWrap = box.querySelector('.task-detail-progress-hero-wrap');
+  if (heroWrap) {
+    const heroHtml = renderTaskDetailProgressHero(task);
+    if (heroWrap.innerHTML !== heroHtml) heroWrap.innerHTML = heroHtml;
+  }
+  const cards = box.querySelector('.task-detail-source-cards');
+  if (cards) {
+    const html = renderTaskDetailSourceProgressInner(task);
+    if (cards.innerHTML !== html) cards.innerHTML = html;
+  }
+}
+
+function renderTaskDetailSourceProgressInner(t) {
+  const sources = (t.progress && t.progress.sources) || [];
+  if (!sources.length) {
+    return '<p class="muted" style="margin:0">暂无分源进度（任务未运行或 Run 已结束）</p>';
+  }
+  return sources.map(renderTaskSourceProgressCard).join('');
+}
+
+function renderTaskDetailSourceProgress(t) {
+  const inner = renderTaskDetailSourceProgressInner(t);
+  if (!inner) return '';
+  return '<div class="task-detail-source-cards">' + inner + '</div>';
+}
+
 async function fetchRunHistoryPage(taskId, reset) {
   if (!runHistoryState[taskId]) {
     runHistoryState[taskId] = { page: 0, runs: [], total: 0, loading: false };
@@ -721,41 +2659,73 @@ async function toggleRunHistory(taskId) {
 }
 
 function renderTaskTable() {
-  const body = document.getElementById('taskTableBody');
-  if (!tasks.length) {
-    body.innerHTML = '<tr><td colspan="9" class="empty">暂无监测任务，点击「创建任务」添加</td></tr>';
-    return;
-  }
-  let html = '';
-  tasks.forEach(function(t) {
-    html += '<tr class="task-row" data-task-id="' + t.id + '">'
-      + '<td>' + t.id + '</td>'
-      + '<td class="truncate cell-name" title="' + esc(t.name || '') + '">' + esc(t.name || '-') + '</td>'
-      + '<td class="cell-stack">' + statusTag(t.status) + '<br><span class="meta">原始 ' + (t.raw_count || 0) + ' / 情报 ' + (t.intel_count || 0) + '</span></td>'
-      + '<td class="truncate cell-partners" title="' + esc(partnerNames(t.partner_ids)) + '">' + esc(partnerNames(t.partner_ids)) + '</td>'
-      + '<td>' + ((t.sources || []).map(function(s) { return sourceTag(s); }).join(' ') || '-') + '</td>'
-      + '<td>' + (t.max_pages || '-') + '</td>'
-      + '<td class="cell-stack">' + formatLastRun(t) + '</td>'
-      + '<td class="cell-stack">' + fmtTime(t.created_at) + '</td>'
-      + '<td class="actions actions-wrap col-actions">'
-      + '<button class="btn btn-primary btn-sm" onclick="runTaskById(' + t.id + ')" ' + (!t.can_run ? 'disabled' : '') + ' title="' + esc(t.run_block_reason || '增量爬取+分析') + '">执行</button>'
-      + '<button class="btn btn-orange btn-sm" onclick="reanalyzeIncremental(' + t.id + ')" ' + (!t.can_reanalyze ? 'disabled' : '') + ' title="仅分析新增/更新的 raw">增量AI</button>'
-      + '<button class="btn btn-orange btn-sm" onclick="reanalyzeFull(' + t.id + ')" ' + (!t.can_reanalyze ? 'disabled' : '') + ' title="清除情报后全量重分析">全量AI</button>'
-      + '<button class="btn btn-gray btn-sm" onclick="toggleRunHistory(' + t.id + ')">' + (expandedRunHistoryTaskId === t.id ? '收起' : '历史') + '</button>'
-      + '<button class="btn btn-gray btn-sm" onclick="editTask(' + t.id + ')" ' + (['crawling', 'analyzing'].includes(t.status) ? 'disabled' : '') + '>编辑</button>'
-      + '<button class="btn btn-gray btn-sm" onclick="deleteTask(' + t.id + ')" ' + (['crawling', 'analyzing'].includes(t.status) ? 'disabled' : '') + '>删除</button>'
-      + '<button class="btn btn-gray btn-sm" onclick="viewTaskIntel(' + t.id + ')">看情报</button>'
-      + '</td></tr>';
-    if (expandedRunHistoryTaskId === t.id) {
-      html += '<tr class="run-history-row"><td colspan="9">' + renderRunHistoryContent(t.id) + '</td></tr>';
-    }
-  });
-  body.innerHTML = html;
+  updateTaskTable(true);
 }
 
-function buildTaskPayload() {
+function updateTaskTable(forceRebuild) {
+  const body = document.getElementById('taskTableBody');
+  if (!body) return;
+  const scrollEl = body.closest('.table-wrap');
+  const scrollTop = scrollEl ? scrollEl.scrollTop : 0;
+
+  if (!tasks.length) {
+    if (!body.querySelector('.empty')) {
+      body.innerHTML = '<tr><td colspan="9" class="empty">暂无监测任务，点击「创建任务」添加</td></tr>';
+    }
+    taskRowSigs = {};
+    return;
+  }
+
+  if (forceRebuild) {
+    taskRowSigs = {};
+    body.innerHTML = '';
+  } else if (body.querySelector('.empty')) {
+    body.innerHTML = '';
+  }
+
+  const seen = new Set();
+  tasks.forEach(function(t) {
+    seen.add(t.id);
+    const sig = taskRowSignature(t);
+    let row = body.querySelector('tr.task-row[data-task-id="' + t.id + '"]');
+
+    if (!row) {
+      const tmp = document.createElement('tbody');
+      tmp.innerHTML = buildTaskRowHtml(t);
+      row = tmp.querySelector('tr.task-row');
+      body.appendChild(row);
+      if (expandedRunHistoryTaskId === t.id) {
+        row.insertAdjacentHTML('afterend', '<tr class="run-history-row" onclick="event.stopPropagation()"><td colspan="9">'
+          + renderRunHistoryContent(t.id) + '</td></tr>');
+      }
+    } else if (taskRowSigs[t.id] !== sig) {
+      patchTaskRow(row, t);
+    }
+    taskRowSigs[t.id] = sig;
+  });
+
+  body.querySelectorAll('tr.task-row').forEach(function(row) {
+    const id = parseInt(row.getAttribute('data-task-id'), 10);
+    if (!seen.has(id)) {
+      const hist = row.nextElementSibling;
+      row.remove();
+      if (hist && hist.classList.contains('run-history-row')) hist.remove();
+      delete taskRowSigs[id];
+    }
+  });
+
+  if (scrollEl) scrollEl.scrollTop = scrollTop;
+}
+
+function buildTaskPayload(existingTask) {
   const sched = window.SchedulePicker ? SchedulePicker.getScheduleFromDom() : { enabled: false };
   const { _preview, ...schedule } = sched;
+  const prevBs = existingTask && existingTask.business_spec
+    ? Object.assign({}, existingTask.business_spec)
+    : {};
+  const ignoreBefore = (document.getElementById('tIgnoreBefore') || {}).value || '';
+  if (ignoreBefore) prevBs.ignore_before = ignoreBefore;
+  else delete prevBs.ignore_before;
   return {
     name: document.getElementById('tName').value.trim(),
     partner_ids: getSelectedPartnerIds(),
@@ -764,7 +2734,12 @@ function buildTaskPayload() {
     crawl_mode: document.getElementById('tCrawlMode').value || 'list_first',
     fetch_detail: document.getElementById('tFetchDetail').checked,
     schedule,
+    business_spec: prevBs,
   };
+}
+
+function formatTaskSubtasks(t) {
+  return renderTaskSourceProgress(t);
 }
 
 function formatLastRun(t) {
@@ -775,17 +2750,39 @@ function formatLastRun(t) {
   return fmtTime(lr.finished_at || lr.started_at) + '<br><span class="meta">' + (lr.trigger || '') + ' · ' + fmtDuration(total) + ' · ' + (lr.status || '') + '</span>' + sched;
 }
 
+let taskPollTimer = null;
+
+function syncTaskPollTimer() {
+  const busy = tasks.some(function(t) {
+    return t.status === 'crawling' || t.status === 'analyzing';
+  });
+  if (busy) {
+    if (!taskPollTimer) {
+      taskPollTimer = setInterval(function() {
+        loadTasks();
+        if (taskDetailState.taskId) {
+          if (['subtasks', 'overview', 'raw', 'intel'].includes(taskDetailState.taskTab)) {
+            refreshTaskDetailHeaderOnly(taskDetailState.taskId);
+          } else {
+            refreshTaskDetailIfOpen(taskDetailState.taskId);
+          }
+        }
+      }, 3000);
+    }
+  } else if (taskPollTimer) {
+    clearInterval(taskPollTimer);
+    taskPollTimer = null;
+  }
+}
+
 async function loadTasks() {
   const d = await api('/api/monitor/tasks');
   tasks = d.tasks || [];
   refreshTaskSelect();
   refreshAiLogTaskSelect();
-  renderPartnerChecks([]);
-  renderTaskTable();
-}
-
-function getSelectedPartnerIds() {
-  return Array.from(document.querySelectorAll('input[name=taskPartner]:checked')).map(el => parseInt(el.value, 10));
+  refreshTaskFormPartnerChecksIfVisible();
+  updateTaskTable(false);
+  syncTaskPollTimer();
 }
 
 function getSelectedSourceIds() {
@@ -818,6 +2815,8 @@ function resetTaskForm() {
   document.getElementById('tPages').value = '2';
   document.getElementById('tCrawlMode').value = 'list_first';
   document.getElementById('tFetchDetail').checked = false;
+  const ign = document.getElementById('tIgnoreBefore');
+  if (ign) ign.value = '';
   renderPartnerChecks([]);
   renderSourceChecks();
   if (window.SchedulePicker) SchedulePicker.fillScheduleForm({ enabled: false });
@@ -827,8 +2826,13 @@ function fillTaskForm(t) {
   document.getElementById('editingTaskId').value = t.id;
   document.getElementById('tName').value = t.name || '';
   document.getElementById('tPages').value = t.max_pages || 2;
-  document.getElementById('tCrawlMode').value = t.crawl_mode || 'legacy';
+  document.getElementById('tCrawlMode').value = t.crawl_mode || 'list_first';
   document.getElementById('tFetchDetail').checked = !!t.fetch_detail;
+  const ign = document.getElementById('tIgnoreBefore');
+  if (ign) {
+    const bs = t.business_spec || {};
+    ign.value = bs.ignore_before || '';
+  }
   renderPartnerChecks(t.partner_ids || []);
   renderSourceChecks(t.sources || []);
   if (window.SchedulePicker) SchedulePicker.fillScheduleForm(t.schedule || {});
@@ -872,7 +2876,8 @@ async function editTask(id) {
 
 async function saveTask() {
   const editId = parseInt(document.getElementById('editingTaskId').value, 10);
-  const payload = buildTaskPayload();
+  const existingTask = editId ? tasks.find(x => x.id === editId) : null;
+  const payload = buildTaskPayload(existingTask);
   if (!payload.partner_ids.length) { toastMsg('请至少选择一个合作方', true); return false; }
   if (!payload.sources.length) { toastMsg('请至少选择一个数据来源', true); return false; }
   if (editId) {
@@ -887,6 +2892,7 @@ async function saveTask() {
     document.getElementById('taskStatus').textContent = '任务 #' + editId + ' 已更新';
     resetTaskForm();
     await loadTasks();
+    refreshTaskDetailIfOpen(editId);
     toastMsg('任务已保存');
     return true;
   }
@@ -905,6 +2911,7 @@ async function deleteTask(id) {
     if (!d.ok) { toastMsg(d.msg || '删除失败', true); return; }
     if (parseInt(document.getElementById('editingTaskId').value, 10) === id) resetTaskForm();
     document.getElementById('taskStatus').textContent = '任务 #' + id + ' 已删除';
+    if (taskDetailState.taskId === id) backToTaskList();
     await loadTasks();
     if (lastTaskId === id) loadRecords();
     toastMsg('任务已删除');
@@ -923,6 +2930,90 @@ async function runTaskById(task_id) {
   }
   if (!d.ok) { toastMsg(d.msg || '启动失败', true); return; }
   document.getElementById('taskStatus').textContent = '任务 #' + task_id + ' 增量执行已启动…';
+  pollTask(task_id);
+}
+
+async function pauseTaskById(task_id, source) {
+  const src = source || 'all';
+  let d;
+  try {
+    d = await api('/api/monitor/tasks/' + task_id + '/pause', {
+      method: 'POST',
+      body: JSON.stringify({ source: src }),
+    });
+  } catch (e) {
+    toastMsg(e.message || '暂停失败', true);
+    return;
+  }
+  if (!d.ok) { toastMsg(d.msg || '暂停失败', true); return; }
+  const label = src === 'all' ? '全部源' : src;
+  toastMsg('已请求暂停任务 #' + task_id + '（' + label + '）');
+  document.getElementById('taskStatus').textContent = '任务 #' + task_id + ' 暂停中（' + label + '）…';
+  if (taskDetailState.taskId === task_id && taskDetailState.taskTab === 'subtasks') {
+    loadTaskDetailSubtasks();
+  }
+  pollTask(task_id);
+}
+
+async function stopTaskById(task_id, source) {
+  const src = source || 'all';
+  const t = tasks.find(function(x) { return x.id === task_id; }) || taskDetailState.task;
+  const name = t ? (t.name || '#' + task_id) : task_id;
+  const ok = await UiShell.confirm(
+    '确定彻底终止监测任务「' + name + '」？\n\n将停止全部 Worker、结束当前 Run，未完成子任务不会保留为「继续」。\n已完成的数据仍保留；之后可点「执行」开始新一轮。',
+    '终止任务'
+  );
+  if (!ok) return;
+  let d;
+  try {
+    d = await api('/api/monitor/tasks/' + task_id + '/stop', {
+      method: 'POST',
+      body: JSON.stringify({ source: src }),
+    });
+  } catch (e) {
+    toastMsg(e.message || '终止失败', true);
+    return;
+  }
+  if (!d.ok) { toastMsg(d.msg || '终止失败', true); return; }
+  toastMsg('任务 #' + task_id + ' 已终止');
+  document.getElementById('taskStatus').textContent = '任务 #' + task_id + ' 已终止';
+  await loadTasks();
+  if (taskDetailState.taskId === task_id) {
+    refreshTaskDetailIfOpen(task_id);
+    if (taskDetailState.taskTab === 'subtasks') loadTaskDetailSubtasks();
+  }
+  pollTask(task_id);
+}
+
+async function resumeTaskById(task_id) {
+  const t = tasks.find(function(x) { return x.id === task_id; }) || taskDetailState.task;
+  const n = t && t.incomplete_subtasks ? t.incomplete_subtasks : '?';
+  const srcs = t && t.resume_sources && t.resume_sources.length
+    ? t.resume_sources.join('、') : '未完成源';
+  const ok = await UiShell.confirm(
+    '继续任务 #' + task_id + '，将执行剩余 ' + n + ' 个子任务（' + srcs + '）。',
+    '继续任务'
+  );
+  if (!ok) return;
+  let d;
+  try {
+    d = await api('/api/monitor/tasks/' + task_id + '/resume', {
+      method: 'POST',
+      body: JSON.stringify({ analyze_mode: 'incremental' }),
+    });
+  } catch (e) {
+    toastMsg(e.message || '继续失败', true);
+    return;
+  }
+  if (!d.ok) { toastMsg(d.msg || '继续失败', true); return; }
+  toastMsg('已继续任务 #' + task_id + '（' + (d.keyword_count || n) + ' 个子任务）');
+  document.getElementById('taskStatus').textContent = '任务 #' + task_id + ' 继续执行中…';
+  await loadTasks();
+  if (taskDetailState.taskId === task_id) {
+    taskDetailState.subtaskRunId = null;
+    await loadTaskDetail(true);
+    if (taskDetailState.taskTab === 'subtasks') await loadTaskDetailSubtasks();
+  }
   pollTask(task_id);
 }
 
@@ -982,6 +3073,43 @@ function onTaskFilterChange() {
   onIntelFilterChange();
 }
 
+function formatTaskProgressSummary(t) {
+  const prog = t.progress || {};
+  const statusLabels = {
+    crawling: '爬取中', analyzing: '分析中', stopped: '已终止',
+    paused: '已暂停', done: '已完成', failed: '失败', queued: '排队中',
+  };
+  const parts = [statusLabels[t.status] || t.status || '—'];
+  if (prog.phase && (t.status === 'crawling' || t.status === 'analyzing')) {
+    parts.push(phaseLabel(prog.phase));
+  }
+  if (prog.subtasks && prog.subtasks.total) {
+    let st = 'keyword ' + (prog.subtasks.done || 0) + '/' + prog.subtasks.total;
+    if (prog.subtasks.running) st += ' · 运行 ' + prog.subtasks.running;
+    if (prog.subtasks.failed) st += ' · 失败 ' + prog.subtasks.failed;
+    parts.push(st);
+  }
+  const sources = prog.sources || [];
+  if (sources.length && (t.status === 'crawling' || t.status === 'analyzing')) {
+    const srcStatusCn = {
+      running: '运行中', pending: '待执行', paused: '已暂停', stopped: '已终止',
+      failed: '失败', done: '完成', idle: '空闲',
+    };
+    sources.forEach(function(s) {
+      if (!s || s.status === 'done' || s.status === 'idle') return;
+      const name = s.source_id === 'heimao' ? '黑猫' : (s.source_id === 'xhs' ? '小红书' : s.source_id);
+      let bit = name + ' ' + (srcStatusCn[s.status] || s.status);
+      const aw = s.active_work;
+      if (aw && aw.phase) bit += ' · ' + phaseLabel(aw.phase) + ' ' + fmtDuration(aw.elapsed_ms || 0);
+      parts.push(bit);
+    });
+  }
+  if (t.error_message && (t.status === 'stopped' || t.status === 'failed' || t.status === 'paused')) {
+    parts.push(String(t.error_message).slice(0, 60));
+  }
+  return parts.join(' · ');
+}
+
 async function pollTask(id) {
   if (!id) return;
   const el = document.getElementById('taskStatus');
@@ -991,12 +3119,23 @@ async function pollTask(id) {
     const d = await api('/api/monitor/tasks/' + id);
     if (!d.ok) break;
     const t = d.task;
-    el.textContent = `任务 #${id}: ${t.status}` + (t.progress && Object.keys(t.progress).length ? ' · ' + JSON.stringify(t.progress) : '');
+    el.textContent = '任务 #' + id + '：' + formatTaskProgressSummary(t);
     await loadTasks();
-    if (t.status === 'done' || t.status === 'failed') {
+    if (taskDetailState.taskId === id && ['subtasks', 'overview', 'raw', 'intel'].includes(taskDetailState.taskTab)) {
+      await refreshTaskDetailHeaderOnly(id);
+    } else {
+      refreshTaskDetailIfOpen(id);
+    }
+    if (t.status === 'done' || t.status === 'failed' || t.status === 'paused' || t.status === 'stopped') {
       if (runHistoryState[id]) delete runHistoryState[id];
       if (expandedRunHistoryTaskId === id) await fetchRunHistoryPage(id, true);
-      if (t.status === 'done') viewTaskIntel(id);
+      if (t.status === 'done') {
+        if (taskDetailState.taskId === id) {
+          refreshTaskDetailIfOpen(id);
+        } else {
+          viewTaskIntel(id);
+        }
+      }
       break;
     }
   }
@@ -1307,3 +3446,8 @@ if (window.SchedulePicker) {
     SchedulePicker.initSchedulePicker();
   });
 }
+
+window.pauseTaskById = pauseTaskById;
+window.stopTaskById = stopTaskById;
+window.resumeTaskById = resumeTaskById;
+window.loadTaskDetailSubtasks = loadTaskDetailSubtasks;

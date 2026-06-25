@@ -6,7 +6,7 @@ HEIMAO_EARLY_STOP_DEFAULT = {
     'min_pages': 1,
     'empty_pages_threshold': 1,
     'protect_first_page': True,
-    'empty_page_retry': 1,
+    'empty_page_retry': 0,
 }
 
 XHS_EARLY_STOP_DEFAULT = {
@@ -32,7 +32,7 @@ def early_stop_cfg(site, site_config=None):
         out['min_pages'] = max(1, int(out.get('min_pages', 1) or 1))
         out['empty_pages_threshold'] = max(1, int(out.get('empty_pages_threshold', 1) or 1))
         out['protect_first_page'] = bool(out.get('protect_first_page', True))
-        out['empty_page_retry'] = max(0, int(out.get('empty_page_retry', 1) or 0))
+        out['empty_page_retry'] = max(0, int(out.get('empty_page_retry', defaults.get('empty_page_retry', 0)) or 0))
     else:
         out['min_pages'] = max(1, int(out.get('min_pages', 1) or 1))
         out['protect_first_page'] = bool(out.get('protect_first_page', True))

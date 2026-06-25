@@ -3,8 +3,19 @@
 
 
 def compute_monitor_deadlines(task_timeout_sec, analysis_timeout_sec, min_crawl_timeout_sec):
-    """返回 task_timeout / analysis_reserve / crawl_budget（秒）。"""
-    task = max(60, int(task_timeout_sec or 7200))
+    """返回 task_timeout / analysis_reserve / crawl_budget（秒）。
+
+    task_timeout_sec <= 0 表示关闭整体超时限制（unlimited=True）。
+    """
+    raw_task = int(task_timeout_sec if task_timeout_sec is not None else 7200)
+    if raw_task <= 0:
+        return {
+            'task_timeout_sec': 0,
+            'analysis_reserve_sec': 0,
+            'crawl_budget_sec': 0,
+            'unlimited': True,
+        }
+    task = max(60, raw_task)
     analysis_cfg = int(analysis_timeout_sec or 3600)
     min_crawl = max(60, int(min_crawl_timeout_sec or 1800))
 
@@ -25,6 +36,7 @@ def compute_monitor_deadlines(task_timeout_sec, analysis_timeout_sec, min_crawl_
         'task_timeout_sec': task,
         'analysis_reserve_sec': analysis_reserve,
         'crawl_budget_sec': crawl_budget,
+        'unlimited': False,
     }
 
 

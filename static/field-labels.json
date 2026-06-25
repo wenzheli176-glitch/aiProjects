@@ -220,7 +220,19 @@
       "label": "第 1 页空结果重试",
       "group": "crawl",
       "type": "number",
-      "help": "黑猫"
+      "help": "黑猫，默认 0 不重试"
+    },
+    "empty_search": {
+      "label": "空搜索行为",
+      "group": "crawl",
+      "type": "object",
+      "help": "无结果时是否误判登录"
+    },
+    "empty_search.login_on_missing_sid": {
+      "label": "无 sid 即等登录",
+      "group": "crawl",
+      "type": "checkbox",
+      "help": "默认 false：SUB 有效则跳过"
     },
     "early_stop.end_texts": {
       "label": "见底文案列表",
@@ -797,6 +809,30 @@
       "group": "monitor_run",
       "type": "number",
       "help": "本 run 或 source 合计 token"
+    },
+    "industry_cohort": {
+      "label": "行业 cohort",
+      "group": "partner",
+      "type": "text",
+      "help": "开放标签；同 cohort 合作方在 list 模式合并监测关键词，可留空"
+    },
+    "partner_cohort_suggest.enabled": {
+      "label": "启用 cohort 推荐",
+      "group": "analysis",
+      "type": "checkbox",
+      "help": "合作方表单「获取推荐」"
+    },
+    "partner_cohort_suggest.web_search_enabled": {
+      "label": "cohort 推荐联网",
+      "group": "analysis",
+      "type": "checkbox",
+      "help": "DuckDuckGo 摘要拼入 prompt；失败降级 LLM-only"
+    },
+    "partner_cohort_suggest.max_candidates": {
+      "label": "cohort 候选数",
+      "group": "analysis",
+      "type": "number",
+      "help": "1–10"
     }
   },
   "elementIds": {

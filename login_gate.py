@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """爬取任务登录门禁：等待用户登录后自动续跑（黑猫 / 小红书）。"""
 import time
+from urllib.parse import parse_qs, urlparse, unquote
 
 from config import get_config, build_heimao_detail_js
 from heimao_session import (
@@ -188,27 +189,27 @@ def probe_heimao_detail_access(ctx, page, log_fn=None, sid=None):
             log_fn('[heimao] 无法为详情链接附加 sid', 'WARN')
         return None
 
-    dp = None
+    if not page:
+        return None
     try:
         js = build_heimao_detail_js()
-        dp = ctx.new_page()
         if sid:
             try:
-                dp.goto(
+                page.goto(
                     ac.get('login_check_url') or ac.get('login_url', 'https://tousu.sina.com.cn/'),
                     timeout=timeout,
                     wait_until='domcontentloaded',
                 )
             except Exception:
                 pass
-        dp.goto(probe_url, timeout=timeout, wait_until='domcontentloaded')
+        page.goto(probe_url, timeout=timeout, wait_until='domcontentloaded')
         time.sleep(wait_sec)
-        detail = dp.evaluate(js.replace('\r', ''))
+        detail = page.evaluate(js.replace('\r', ''))
         if _heimao_detail_has_body(detail):
             if log_fn:
                 log_fn('[heimao] 详情探测通过: %s' % probe_url[-40:])
             return True
-        if page_has_login_wall(dp, 'heimao') or page_has_login_fail_text(dp, 'heimao'):
+        if page_has_login_wall(page, 'heimao') or page_has_login_fail_text(page, 'heimao'):
             if log_fn:
                 log_fn('[heimao] 详情页需登录（探测未通过，url=%s）' % probe_url[-50:], 'WARN')
             return False
@@ -225,12 +226,6 @@ def probe_heimao_detail_access(ctx, page, log_fn=None, sid=None):
         if log_fn:
             log_fn('[heimao] 详情探测异常: %s' % str(e)[:80], 'WARN')
         return None
-    finally:
-        if dp:
-            try:
-                dp.close()
-            except Exception:
-                pass
 
 
 def heimao_is_logged_in_live(ctx, page, navigate=True):
@@ -355,6 +350,67 @@ def _xhs_wait_note_items(page, wait_ms=12000):
     except Exception:
         pass
     return xhs_count_note_items(page)
+
+
+def xhs_current_search_keyword(page):
+    """从 search_result URL 解析当前 keyword 参数（已 URL 解码）。"""
+    try:
+        qs = parse_qs(urlparse(page.url or '').query)
+        raw = (qs.get('keyword') or [''])[0]
+        return unquote(raw).strip()
+    except Exception:
+        return ''
+
+
+def xhs_page_on_search_result(page):
+    return 'search_result' in ((page.url or '').lower())
+
+
+def xhs_need_goto_search(page, keyword):
+    """是否需打开新搜索页（关键词变化或未在搜索结果页）。"""
+    kw = (keyword or '').strip()
+    if not kw:
+        return False
+    if not xhs_page_on_search_result(page):
+        return True
+    return xhs_current_search_keyword(page) != kw
+
+
+def xhs_open_search_page(ctx, page, keyword, runtime, search_url=None, timeout_ms=None, after_wait_sec=None):
+    """
+    确保 page 处于 keyword 对应的小红书搜索结果页。
+    返回 False 表示登录阻塞或打开失败。
+    """
+    import time
+    from config import get_config
+
+    x = get_config().get('xhs', {})
+    kw = (keyword or '').strip()
+    if not kw:
+        return False
+    if not search_url:
+        search_url = x.get('search_url_template', '').format(keyword=kw)
+    if not search_url:
+        return False
+    timeout = int(timeout_ms or x.get('page_timeout_ms', 30000))
+    after_wait = float(after_wait_sec if after_wait_sec is not None else x.get('after_goto_wait', 5))
+
+    if xhs_need_goto_search(page, kw):
+        if runtime and getattr(runtime, 'log', None):
+            prev = xhs_current_search_keyword(page)
+            if prev and prev != kw:
+                runtime.log('[xhs] 切换搜索关键词: %s → %s' % (prev[:20], kw[:20]))
+            elif not xhs_page_on_search_result(page):
+                runtime.log('[xhs] 打开搜索页: %s' % kw[:30])
+        try:
+            page.goto(search_url, timeout=timeout, wait_until='domcontentloaded')
+            time.sleep(after_wait)
+        except Exception as e:
+            if runtime and getattr(runtime, 'log', None):
+                runtime.log('[xhs] 打开搜索页失败: %s' % str(e)[:80], 'ERROR')
+            return False
+
+    return xhs_wait_if_search_blocked(ctx, page, runtime, search_url, timeout, after_wait)
 
 
 def xhs_search_page_needs_login(page, ctx=None):
@@ -572,42 +628,98 @@ def wait_for_site_login(ctx, page, site, runtime):
     return False
 
 
-def heimao_wait_if_search_empty(ctx, page, html, keyword, runtime, redo_search=None):
+def heimao_empty_search_cfg():
+    h = get_config().get('heimao') or {}
+    raw = h.get('empty_search') if isinstance(h.get('empty_search'), dict) else {}
+    return {
+        'login_on_missing_sid': bool(raw.get('login_on_missing_sid', False)),
+    }
+
+
+def heimao_classify_empty_search(ctx, page, html, link_regex=None, min_text_len=None):
     """
-    搜索无投诉链接时：无 sid 一律等待登录（忽略可能过期的 SUB）。
+    空搜索分类：has_results | no_results | empty_uncertain | auth_required | blocked
+    """
+    h = get_config().get('heimao') or {}
+    link_regex = link_regex if link_regex is not None else h.get('link_regex', '')
+    min_text_len = int(min_text_len if min_text_len is not None else h.get('min_link_text_len', 15))
+    min_html = int(h.get('min_html_len', 1000))
+
+    n = count_heimao_complaint_links(html, link_regex, min_text_len)
+    if n > 0:
+        return 'has_results'
+
+    if html is not None and len(html) < min_html:
+        return 'blocked'
+
+    sid = extract_heimao_sid(page, ctx) or ''
+    if sid:
+        return 'no_results'
+
+    cfg = heimao_empty_search_cfg()
+    if cfg.get('login_on_missing_sid'):
+        return 'auth_required'
+
+    if not heimao_browser_has_weibo_session(ctx):
+        return 'auth_required'
+    if heimao_page_shows_login_prompt(page):
+        return 'auth_required'
+    fail_text, _fail_msg = _page_has_login_fail_text(page, 'heimao')
+    if fail_text:
+        return 'auth_required'
+
+    return 'empty_uncertain'
+
+
+def heimao_wait_if_search_empty(ctx, page, html, keyword, runtime, redo_search=None, run_metrics=None):
+    """
+    搜索无投诉链接时：仅明确登录失效才 WAITING_LOGIN；否则跳过当前关键词。
     redo_search: 登录成功后的回调 () -> html，用于重新搜索。
     """
-    h = get_config().get('heimao', {})
-    link_regex = h.get('link_regex', '')
-    min_text = int(h.get('min_link_text_len', 15))
+    kind = heimao_classify_empty_search(ctx, page, html)
 
-    def _count(htm):
-        return count_heimao_complaint_links(htm, link_regex, min_text)
-
-    n = _count(html)
-    sid = extract_heimao_sid(page, ctx) or ''
-
-    if n > 0:
+    if kind == 'has_results':
         return True
 
-    if sid and n == 0:
+    if kind == 'no_results':
         runtime.log(
-            '[heimao] 搜索「%s」无投诉链接（已有 sid，可能关键词无结果）' % keyword,
+            '[heimao] 无结果，跳过: %s（已有 sid，可能关键词无结果）' % keyword,
             'WARN',
         )
+        if run_metrics:
+            run_metrics.record_heimao_skipped_empty(1)
         return True
 
-    runtime.log(
-        '[heimao] 搜索无结果且无 sid（会话无效或未登录），进入等待登录…',
-        'WARN',
-    )
+    if kind == 'empty_uncertain':
+        runtime.log(
+            '[heimao] 无结果，跳过: %s（会话有效，无 sid）' % keyword,
+            'WARN',
+        )
+        if run_metrics:
+            run_metrics.record_heimao_skipped_empty(1)
+        return True
+
+    if kind == 'blocked':
+        runtime.log(
+            '[heimao] 搜索页异常（内容过短），需登录或稍后重试: %s' % keyword,
+            'WARN',
+        )
+    else:
+        runtime.log(
+            '[heimao] 搜索需登录: %s' % keyword,
+            'WARN',
+        )
     if not wait_for_site_login(ctx, page, 'heimao', runtime):
         return False
 
     if callable(redo_search):
         runtime.log('[heimao] 登录成功，重新搜索…')
         html = redo_search() or page.content()
-        if _count(html) > 0:
+        if count_heimao_complaint_links(
+            html,
+            get_config().get('heimao', {}).get('link_regex', ''),
+            int(get_config().get('heimao', {}).get('min_link_text_len', 15)),
+        ) > 0:
             runtime.log('[heimao] 重新搜索后已发现投诉链接', 'INFO')
             return True
         runtime.log('[heimao] 登录后仍无搜索结果，请检查关键词或页面', 'WARN')

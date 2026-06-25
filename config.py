@@ -126,6 +126,7 @@ DEFAULT_CONFIG = {
         'between_pages_max': 6,
         'detail_wait_min': 5,
         'detail_wait_max': 8,
+        'partner_timeout_sec': 3600,
         'typing_delay_min': 80,
         'typing_delay_max': 150,
         'title_max_len': 100,
@@ -144,7 +145,10 @@ DEFAULT_CONFIG = {
             'min_pages': 1,
             'empty_pages_threshold': 1,
             'protect_first_page': True,
-            'empty_page_retry': 1,
+            'empty_page_retry': 0,
+        },
+        'empty_search': {
+            'login_on_missing_sid': False,
         },
         'detail': {
             'author_cats': ['机灵喵', '洞察喵', '友爱喵', '正义喵', '勇敢喵', '诚实喵'],
@@ -211,6 +215,7 @@ DEFAULT_CONFIG = {
             'between_detail_max': 7,
             'max_modal_per_run': 200,
         },
+        'keyword_timeout_sec': 3600,
         'early_stop': {
             'enabled': True,
             'min_pages': 1,
@@ -254,7 +259,7 @@ DEFAULT_CONFIG = {
         'heimao': {
             'enabled': True,
             'label': '黑猫投诉',
-            'crawl_mode': 'legacy',
+            'crawl_mode': 'list_first',
             'allowed_crawl_modes': ['legacy', 'list_first'],
         },
         'xhs': {
@@ -300,6 +305,11 @@ DEFAULT_CONFIG = {
                 }],
             },
         },
+        'xhs_credential_pool': {
+            'min_accounts': 2,
+            'login_cdp_port_base': 9250,
+            'login_wait_timeout_sec': 600,
+        },
     },
     'analysis': {
         'provider': 'minimax',
@@ -338,6 +348,15 @@ DEFAULT_CONFIG = {
                 'min_relevance': 'medium',
                 'min_risk_hint': 'elevated',
             },
+        },
+        'partner_cohort_suggest': {
+            'enabled': True,
+            'model': 'MiniMax-M3',
+            'max_candidates': 5,
+            'web_search_enabled': True,
+            'web_search_max_results': 3,
+            'mock_without_key': False,
+            'timeout_sec': 60,
         },
     },
     'intel': {

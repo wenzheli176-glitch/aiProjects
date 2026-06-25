@@ -445,14 +445,29 @@ def analyze_candidates(task_id, job_id, candidates, partner, log_fn=None, run_me
         return batch_written
 
     workers = min(parallel_batches, len(batches)) if batches else 1
-    if workers <= 1:
+    if threading.current_thread() is not threading.main_thread():
+        workers = 1
+    if workers <= 1 or len(batches) <= 1:
         for bi, batch in enumerate(batches):
             _process_batch(bi, batch)
     else:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [pool.submit(_process_batch, bi, batch) for bi, batch in enumerate(batches)]
-            for fut in as_completed(futures):
-                fut.result()
+        try:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(_process_batch, bi, batch) for bi, batch in enumerate(batches)]
+                for fut in as_completed(futures):
+                    fut.result()
+        except RuntimeError as e:
+            msg = str(e).lower()
+            if 'cannot schedule new futures' in msg or 'interpreter shutdown' in msg:
+                _ai_log(
+                    log_fn,
+                    '并行分析线程池不可用（%s），改为顺序执行' % str(e)[:80],
+                    'WARN',
+                )
+                for bi, batch in enumerate(batches):
+                    _process_batch(bi, batch)
+            else:
+                raise
 
     elapsed = time.time() - job_start
     from intel.db import get_analysis_job

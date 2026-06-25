@@ -5,6 +5,7 @@
 """
 from __future__ import print_function
 import sys, os, time, json, random, re, threading, subprocess, socket
+from contextlib import contextmanager
 from urllib.parse import parse_qs, urlparse
 sys.stdout.reconfigure(encoding='utf-8')
 sys.stderr.reconfigure(encoding='utf-8')
@@ -17,17 +18,21 @@ from auth_utils import (
     apply_cookies_to_context,
     diagnose_login,
     export_cookies_from_context,
+    close_extra_pages,
+    get_active_page,
     has_weibo_session,
     has_xhs_session,
     load_site_cookies,
     save_site_cookies,
     parse_cookies_text,
+    _page_is_usable,
 )
 from reports import structure_heimao_record
 from login_gate import (
     ensure_login_for_detail,
     heimao_wait_if_search_empty,
     is_heimao_detail_auth_failure,
+    xhs_open_search_page,
     is_xhs_detail_auth_failure,
     wait_for_site_login,
     xhs_wait_if_search_blocked,
@@ -62,6 +67,8 @@ class S:
     login_wait = None
     heimao_sid = ''
     xhs_pending_keyword = ''
+    worker_cdp_port = None
+    xhs_pool_cookies_file = ''
     results_heimao = []; results_xhs = []
     logs = []; lock = threading.Lock()
 
@@ -190,12 +197,25 @@ def _cdp_url_for_port(port):
 
 
 def connect_cdp(cdp_port=None, reset=False):
-    if cdp_port is not None:
-        cdp_url = _cdp_url_for_port(cdp_port)
+    port = cdp_port
+    if port is None and getattr(S, 'worker_cdp_port', None) is not None:
+        port = int(S.worker_cdp_port)
+    if port is not None:
+        cdp_url = _cdp_url_for_port(port)
     else:
         cdp_url = _c()['chrome']['cdp_url']
-    if reset or cdp_port is not None:
+
+    if reset:
         _reset_playwright_session()
+    elif S.browser is not None:
+        try:
+            _ = S.browser.contexts
+            check_port = port if port is not None else _effective_cdp_port()
+            if _cdp_http_ready(check_port):
+                return S.ctx
+        except Exception:
+            _reset_playwright_session()
+
     if S.pw is None:
         S.pw = sync_playwright().start()
     if S.browser is None:
@@ -204,7 +224,105 @@ def connect_cdp(cdp_port=None, reset=False):
     return S.ctx
 
 
-def prepare_worker_browser(cdp_port, user_data_dir, log_fn=None, startup_url=None):
+@contextmanager
+def ephemeral_cdp_context(cdp_port):
+    """独立 Playwright 连接（不占用全局 S），供 Flask 登录等等跨请求线程场景。"""
+    cdp_url = _cdp_url_for_port(int(cdp_port))
+    pw = sync_playwright().start()
+    browser = None
+    try:
+        browser = pw.chromium.connect_over_cdp(cdp_url)
+        if not browser.contexts:
+            raise RuntimeError('CDP 无可用 browser context')
+        yield browser.contexts[0]
+    finally:
+        try:
+            if browser:
+                browser.close()
+        except Exception:
+            pass
+        try:
+            pw.stop()
+        except Exception:
+            pass
+
+
+def _wait_cdp_port_closed(port, timeout_sec=10):
+    deadline = time.monotonic() + max(0.5, float(timeout_sec or 10))
+    while time.monotonic() < deadline:
+        if not _cdp_port_open_on(int(port)):
+            return True
+        time.sleep(0.25)
+    return not _cdp_port_open_on(int(port))
+
+
+def _kill_process_on_port_windows(port, log_fn=None):
+    """Windows：按监听端口结束进程（CDP browser.close 未退出时的兜底）。"""
+    import subprocess
+    import sys
+
+    if sys.platform != 'win32':
+        return False
+    try:
+        out = subprocess.check_output(
+            ['netstat', '-ano', '-p', 'tcp'],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding='utf-8',
+            errors='ignore',
+        )
+    except Exception:
+        return False
+    needle = ':%d' % int(port)
+    pids = set()
+    for line in out.splitlines():
+        if needle not in line or 'LISTENING' not in line.upper():
+            continue
+        parts = line.split()
+        if parts and parts[-1].isdigit():
+            pids.add(parts[-1])
+    killed = False
+    for pid in pids:
+        try:
+            subprocess.run(
+                ['taskkill', '/F', '/PID', pid],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+            )
+            killed = True
+            if log_fn:
+                log_fn('已结束占用 CDP 端口 %d 的进程 PID=%s' % (int(port), pid), 'WARN')
+        except Exception:
+            pass
+    return killed
+
+
+def kill_cdp_browser_on_port(cdp_port, log_fn=None):
+    """关闭指定端口 Chrome 并等待端口释放（账号轮换换 profile 前必须调用）。"""
+    port = int(cdp_port)
+    if not _cdp_port_open_on(port):
+        return True
+    shutdown_cdp_browser(port)
+    if _wait_cdp_port_closed(port, 8):
+        return True
+    _kill_process_on_port_windows(port, log_fn=log_fn)
+    return _wait_cdp_port_closed(port, 8)
+
+
+def shutdown_cdp_browser(cdp_port):
+    """关闭指定端口的 Chrome 进程，不触碰全局 Playwright 会话。"""
+    if not _cdp_port_open_on(int(cdp_port)):
+        return
+    try:
+        with ephemeral_cdp_context(cdp_port):
+            pass
+    except Exception:
+        pass
+
+
+def prepare_worker_browser(cdp_port, user_data_dir, log_fn=None, startup_url=None, force_restart=False):
     """为 Worker 实例启动独立 Chrome（指定 CDP 端口与 profile）。"""
     c = _c()['chrome']
     port = int(cdp_port)
@@ -221,14 +339,23 @@ def prepare_worker_browser(cdp_port, user_data_dir, log_fn=None, startup_url=Non
         else:
             log(msg, level)
 
-    try:
-        import urllib.request
-        req = urllib.request.Request(cdp_url + '/json/version', headers={'User-Agent': 'Mozilla/5.0'})
-        resp = urllib.request.urlopen(req, timeout=http_timeout)
-        if resp.status == 200:
-            return True
-    except Exception:
-        pass
+    if force_restart and _cdp_port_open_on(port):
+        wlog('强制重启 Worker Chrome (port %d) 以切换 profile' % port, 'WARN')
+        kill_cdp_browser_on_port(port, log_fn=log_fn)
+        if _cdp_port_open_on(port):
+            _kill_process_on_port_windows(port, log_fn=log_fn)
+            _wait_cdp_port_closed(port, 12)
+        time.sleep(0.5)
+
+    if not force_restart:
+        try:
+            import urllib.request
+            req = urllib.request.Request(cdp_url + '/json/version', headers={'User-Agent': 'Mozilla/5.0'})
+            resp = urllib.request.urlopen(req, timeout=http_timeout)
+            if resp.status == 200:
+                return True
+        except Exception:
+            pass
 
     for f in ['SingletonLock', 'SingletonCookie', 'SingletonSocket']:
         try:
@@ -236,11 +363,16 @@ def prepare_worker_browser(cdp_port, user_data_dir, log_fn=None, startup_url=Non
         except Exception:
             pass
 
+    if _cdp_port_open_on(port):
+        wlog('CDP 端口 %d 仍被占用，无法启动新 Chrome' % port, 'ERROR')
+        return False
+
     url = startup_url or c.get('startup_url', 'https://tousu.sina.com.cn/')
-    wlog('启动 Worker Chrome (CDP port %d)...' % port)
+    wlog('启动 Worker Chrome (CDP port %d, profile=%s)...' % (port, os.path.basename(profile_dir)))
     cmd = [
         c['exe_path'],
         '--remote-debugging-port=%d' % port,
+        '--remote-debugging-address=127.0.0.1',
         '--user-data-dir=' + profile_dir,
     ] + list(c.get('extra_args', [])) + [url]
     try:
@@ -285,30 +417,40 @@ def close_cdp(shutdown_browser=False, force=False):
         pass
 
 
-def _cdp_http_ready():
-    c = _c()['chrome']
+def _effective_cdp_port():
+    wp = getattr(S, 'worker_cdp_port', None)
+    if wp is not None:
+        return int(wp)
+    return int(_c()['chrome'].get('cdp_port', 9222))
+
+
+def _cdp_http_ready(port=None):
+    port = int(port if port is not None else _effective_cdp_port())
     try:
         import urllib.request
         req = urllib.request.Request(
-            c['cdp_url'] + '/json/version',
+            _cdp_url_for_port(port) + '/json/version',
             headers={'User-Agent': 'Mozilla/5.0'},
         )
-        resp = urllib.request.urlopen(req, timeout=float(c.get('cdp_http_timeout', 2)))
+        resp = urllib.request.urlopen(req, timeout=float(_c()['chrome'].get('cdp_http_timeout', 2)))
         return resp.status == 200
     except Exception:
         return False
 
 
-def _cdp_port_open():
-    cdp_port = int(_c()['chrome']['cdp_port'])
+def _cdp_port_open_on_port(port):
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(1)
-        ok = s.connect_ex(('127.0.0.1', cdp_port)) == 0
+        ok = s.connect_ex(('127.0.0.1', int(port))) == 0
         s.close()
         return ok
     except Exception:
         return False
+
+
+def _cdp_port_open():
+    return _cdp_port_open_on_port(_effective_cdp_port())
 
 
 def _reset_playwright_session():
@@ -325,19 +467,26 @@ def _reset_playwright_session():
 
 def prepare_browser_for_crawl():
     """爬取前确保 CDP 可用；监测任务长跑后优先复用/重连，失败再重启 Chrome。"""
+    port = _effective_cdp_port()
+    worker_mode = getattr(S, 'worker_cdp_port', None) is not None
+
     if S.browser is not None:
         try:
-            if _cdp_http_ready():
-                _ = S.browser.contexts
+            _ = S.browser.contexts
+            if _cdp_http_ready(port):
                 return True
         except Exception:
             pass
         log('Playwright 连接已失效，正在重连 CDP…', 'WARN')
         _reset_playwright_session()
 
-    if _cdp_http_ready():
+    if _cdp_http_ready(port):
         S.browser_launched = True
         return True
+
+    if worker_mode:
+        log('Worker Chrome CDP 未响应 (port %d)' % port, 'ERROR')
+        return False
 
     if not _cdp_port_open():
         log('CDP 端口未就绪，正在自动启动 Chrome…')
@@ -353,7 +502,7 @@ def prepare_browser_for_crawl():
             return True
     return False
 
-def crawl_heimao(keyword, max_pages, fetch_detail=True, managed_session=False, timeout_check=None):
+def crawl_heimao(keyword, max_pages, fetch_detail=True, managed_session=False, timeout_check=None, run_metrics=None):
     h = _c()['heimao']
     if not managed_session:
         S.running = True
@@ -369,7 +518,7 @@ def crawl_heimao(keyword, max_pages, fetch_detail=True, managed_session=False, t
             log('Chrome 未就绪，爬取已取消', 'ERROR')
             return results
         ctx = connect_cdp()
-        main_page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        main_page = get_active_page(ctx, 'heimao')
         if not ensure_login_for_detail(ctx, main_page, 'heimao', fetch_detail, S):
             log('黑猫登录未完成，爬取已取消', 'ERROR')
             return results
@@ -387,6 +536,7 @@ def crawl_heimao(keyword, max_pages, fetch_detail=True, managed_session=False, t
             return results
         sb.click()
         time.sleep(0.3)
+        detail_page = None
         sb.fill('')
         time.sleep(0.2)
         sb.type(keyword, delay=random.randint(
@@ -425,13 +575,13 @@ def crawl_heimao(keyword, max_pages, fetch_detail=True, managed_session=False, t
         first_html = main_page.content()
         if not heimao_wait_if_search_empty(
             ctx, main_page, first_html, keyword, S, redo_search=_redo_heimao_search,
+            run_metrics=run_metrics,
         ):
             log('黑猫登录未完成，爬取已取消', 'ERROR')
             return results
-        if count_heimao_complaint_links(
-            first_html, h['link_regex'], int(h.get('min_link_text_len', 15)),
-        ) == 0:
-            first_html = _redo_heimao_search() or first_html
+        min_text = int(h.get('min_link_text_len', 15))
+        if count_heimao_complaint_links(first_html, h['link_regex'], min_text) == 0:
+            return results
 
         es = early_stop_cfg('heimao', h)
         consecutive_empty = 0
@@ -456,7 +606,7 @@ def crawl_heimao(keyword, max_pages, fetch_detail=True, managed_session=False, t
                 page_too_short = False
                 parse_attempts = 1
                 if es.get('enabled') and p == 1 and es.get('protect_first_page'):
-                    parse_attempts = 1 + int(es.get('empty_page_retry', 1))
+                    parse_attempts = 1 + int(es.get('empty_page_retry', 0))
 
                 new_count = 0
                 for attempt in range(parse_attempts):
@@ -521,7 +671,8 @@ def crawl_heimao(keyword, max_pages, fetch_detail=True, managed_session=False, t
                                 S.heimao_sid = sid
                             try:
                                 log('  详情: %s' % detail_link[-36:])
-                                detail_page = ctx.new_page()
+                                if not _page_is_usable(detail_page):
+                                    detail_page = ctx.new_page()
                                 detail_page.goto(detail_link, timeout=timeout, wait_until='domcontentloaded')
                                 time.sleep(random.uniform(
                                     float(h.get('detail_wait_min', 5)),
@@ -529,12 +680,10 @@ def crawl_heimao(keyword, max_pages, fetch_detail=True, managed_session=False, t
                                 ))
                                 detail = detail_page.evaluate(js_detail.replace(chr(13), ''))
                                 if is_heimao_detail_auth_failure(detail_page, detail):
-                                    detail_page.close()
                                     log('  详情页未登录或内容为空，等待登录后重试…', 'WARN')
                                     if not wait_for_site_login(ctx, main_page, 'heimao', S):
                                         S.running = False
                                         break
-                                    detail_page = ctx.new_page()
                                     sid = S.heimao_sid or extract_heimao_sid(main_page, ctx)
                                     detail_link = ensure_heimao_detail_url(r['link'], sid)
                                     detail_page.goto(detail_link, timeout=timeout, wait_until='domcontentloaded')
@@ -551,15 +700,14 @@ def crawl_heimao(keyword, max_pages, fetch_detail=True, managed_session=False, t
                                     if r.get('title') and len(r['title']) > 5
                                     else r.get('problem') or r.get('merchant')
                                 ))
-                                detail_page.close()
                             except Exception as e:
                                 log('  详情错误: %s' % str(e)[:60], 'ERROR')
                                 try:
-                                    for pg in ctx.pages:
-                                        if pg != main_page:
-                                            pg.close()
+                                    if _page_is_usable(detail_page) and detail_page is not main_page:
+                                        detail_page.close()
                                 except Exception:
                                     pass
+                                detail_page = None
 
                         sr = structure_heimao_record(r, len(results) + 1)
                         r['structured'] = sr
@@ -615,7 +763,7 @@ def crawl_heimao(keyword, max_pages, fetch_detail=True, managed_session=False, t
 
 
 def fetch_heimao_details_by_urls(urls, managed_session=True, log_fn=None):
-    """勘察阶段：按 URL 列表抓取黑猫详情。"""
+    """勘察阶段：按 URL 列表抓取黑猫详情（单标签导航，不新建弹窗）。"""
     h = _c()['heimao']
     results = []
     if not urls:
@@ -629,13 +777,19 @@ def fetch_heimao_details_by_urls(urls, managed_session=True, log_fn=None):
         else:
             log(msg, level)
 
+    def _ensure_page(ctx, page):
+        if _page_is_usable(page):
+            return page
+        return get_active_page(ctx, 'heimao', log_fn=_log)
+
     try:
         if not prepare_browser_for_crawl():
             _log('Chrome 未就绪', 'ERROR')
             return results
         ctx = connect_cdp()
-        main_page = ctx.pages[0] if ctx.pages else ctx.new_page()
-        if not ensure_login_for_detail(ctx, main_page, 'heimao', True, S):
+        page = get_active_page(ctx, 'heimao', log_fn=_log)
+        close_extra_pages(ctx, keep_page=page)
+        if not ensure_login_for_detail(ctx, page, 'heimao', True, S):
             _log('黑猫登录未完成', 'ERROR')
             return results
         for url in urls:
@@ -643,43 +797,36 @@ def fetch_heimao_details_by_urls(urls, managed_session=True, log_fn=None):
                 break
             if not url:
                 continue
-            sid = S.heimao_sid or extract_heimao_sid(main_page, ctx)
+            page = _ensure_page(ctx, page)
+            sid = S.heimao_sid or extract_heimao_sid(page, ctx)
             detail_link = ensure_heimao_detail_url(url, sid)
             r = {'link': url, 'source': h.get('source_name', '黑猫投诉')}
             try:
-                detail_page = ctx.new_page()
-                detail_page.goto(detail_link, timeout=timeout, wait_until='domcontentloaded')
+                page.goto(detail_link, timeout=timeout, wait_until='domcontentloaded')
                 time.sleep(random.uniform(
                     float(h.get('detail_wait_min', 5)),
                     float(h.get('detail_wait_max', 8)),
                 ))
-                detail = detail_page.evaluate(js_detail.replace(chr(13), ''))
-                if is_heimao_detail_auth_failure(detail_page, detail):
-                    detail_page.close()
-                    if not wait_for_site_login(ctx, main_page, 'heimao', S):
+                detail = page.evaluate(js_detail.replace(chr(13), ''))
+                if is_heimao_detail_auth_failure(page, detail):
+                    if not wait_for_site_login(ctx, page, 'heimao', S):
                         break
-                    detail_page = ctx.new_page()
-                    detail_page.goto(detail_link, timeout=timeout, wait_until='domcontentloaded')
+                    page = _ensure_page(ctx, page)
+                    page.goto(detail_link, timeout=timeout, wait_until='domcontentloaded')
                     time.sleep(random.uniform(
                         float(h.get('detail_wait_min', 5)),
                         float(h.get('detail_wait_max', 8)),
                     ))
-                    detail = detail_page.evaluate(js_detail.replace(chr(13), ''))
+                    detail = page.evaluate(js_detail.replace(chr(13), ''))
                 for k in ['title', 'content', 'demand', 'merchant', 'problem', 'amount', 'reply', 'author', 'time', 'status', 'comments']:
                     if detail.get(k):
                         r[k] = detail[k]
-                detail_page.close()
                 sr = structure_heimao_record(r, len(results) + 1)
                 r['structured'] = sr
                 results.append(r)
             except Exception as e:
                 _log('详情错误 %s: %s' % (url[-24:], str(e)[:60]), 'ERROR')
-                try:
-                    for pg in ctx.pages:
-                        if pg != main_page:
-                            pg.close()
-                except Exception:
-                    pass
+        close_extra_pages(ctx, keep_page=page)
     except Exception as e:
         _log('fetch_heimao_details 异常: %s' % str(e)[:80], 'ERROR')
     return results
@@ -740,10 +887,10 @@ def crawl_xhs(keyword, max_pages, fetch_detail=True, managed_session=False, time
 
         search_url = x['search_url_template'].format(keyword=keyword)
         after_wait = float(x.get('after_goto_wait', 5))
-        if 'search_result' not in (page.url or ''):
-            page.goto(search_url, timeout=timeout, wait_until='domcontentloaded')
-            time.sleep(after_wait)
-        if not xhs_wait_if_search_blocked(ctx, page, S, search_url, timeout, after_wait):
+        if not xhs_open_search_page(
+            ctx, page, keyword, S,
+            search_url=search_url, timeout_ms=timeout, after_wait_sec=after_wait,
+        ):
             log('小红书登录未完成，爬取已取消', 'ERROR')
             return results
 
@@ -867,6 +1014,135 @@ def crawl_xhs(keyword, max_pages, fetch_detail=True, managed_session=False, time
     return results
 
 
+def crawl_xhs_list_with_dom(keyword, max_pages, managed_session=True, timeout_check=None, log_fn=None):
+    """
+    小红书列表爬取并保留 link→note-item 映射，供 keyword 流水线同页勘察。
+    返回 {records, page, ctx, items_by_link, error?}。
+    """
+    x = _c()['xhs']
+    log = log_fn or S.log
+    results = []
+    items_by_link = {}
+    seen = set()
+    page = None
+    ctx = None
+    timeout = int(x.get('page_timeout_ms', 30000))
+    title_max = int(x.get('title_max_len', 100))
+    preview_len = int(x.get('title_preview_len', 40))
+
+    try:
+        if not prepare_browser_for_crawl():
+            return {'records': [], 'error': 'Chrome 未就绪', 'page': None, 'ctx': None, 'items_by_link': {}}
+        ctx = connect_cdp()
+        page = get_active_page(ctx, 'xhs')
+        if not ensure_login_for_detail(ctx, page, 'xhs', False, S, search_keyword=keyword):
+            return {'records': [], 'error': '登录未完成', 'page': page, 'ctx': ctx, 'items_by_link': {}}
+
+        search_url = x['search_url_template'].format(keyword=keyword)
+        after_wait = float(x.get('after_goto_wait', 5))
+        if not xhs_open_search_page(
+            ctx, page, keyword, S,
+            search_url=search_url, timeout_ms=timeout, after_wait_sec=after_wait,
+        ):
+            return {'records': [], 'error': '搜索页打开失败', 'page': page, 'ctx': ctx, 'items_by_link': {}}
+
+        es = early_stop_cfg('xhs', x)
+        xhs_stop_state = {'saturation_rounds': 0, 'prev_item_count': 0}
+
+        for p in range(1, max_pages + 1):
+            if not S.running:
+                break
+            if timeout_check and timeout_check():
+                break
+            log('XHS第 %d/%d 页' % (p, max_pages))
+            try:
+                for _ in range(int(x.get('scroll_times_per_page', 3))):
+                    page.evaluate('window.scrollBy(0, %d)' % int(x.get('scroll_pixels', 1500)))
+                    time.sleep(float(x.get('scroll_wait_seconds', 2)))
+
+                dom_items = page.query_selector_all(x['note_item_selector'])
+                item_count = len(dom_items)
+                log('找到 %d 个note-item' % item_count)
+
+                stop, reason = xhs_should_stop_end_marker(es, p, max_pages, page, item_count)
+                if stop and reason:
+                    log(format_early_stop_log('xhs', reason, p, max_pages))
+                    break
+
+                before_len = len(results)
+                for item in dom_items:
+                    try:
+                        le = item.query_selector(x['link_selector'])
+                        if not le:
+                            continue
+                        link = le.get_attribute('href') or ''
+                        host = x.get('link_host', 'https://www.xiaohongshu.com')
+                        if link and not link.startswith('http'):
+                            link = host + link
+                        if not link or link in seen:
+                            continue
+                        seen.add(link)
+                        items_by_link[link] = item
+
+                        def _text(sel):
+                            el = item.query_selector(sel)
+                            return el.inner_text().strip() if el else ''
+
+                        r = {
+                            'title': _text(x['title_selector'])[:title_max],
+                            'content': _text(x['text_selector']),
+                            'time': _text(x['time_selector']),
+                            'author': _text(x['author_selector']),
+                            'likes': _text(x['likes_selector']),
+                            'collects': '',
+                            'comments': '',
+                            'tags': '',
+                            'link': link,
+                            'page': p,
+                            'source': x.get('source_name', '小红书'),
+                        }
+                        if r['title'] or r['content']:
+                            results.append(r)
+                            log('XHS: %s' % (
+                                r['title'][:preview_len] if r['title'] else r['content'][:preview_len]
+                            ))
+                    except Exception:
+                        pass
+
+                new_count = len(results) - before_len
+                log('累计: %d (本轮 +%d)' % (len(results), new_count))
+                stop, reason = xhs_update_saturation(
+                    es, xhs_stop_state, p, max_pages, new_count, item_count,
+                )
+                if stop and reason:
+                    log(format_early_stop_log('xhs', reason, p, max_pages))
+                    break
+            except Exception as e:
+                log('错误: %s' % str(e)[:100], 'ERROR')
+                time.sleep(3)
+                continue
+            time.sleep(random.uniform(
+                float(x.get('between_pages_min', 5)),
+                float(x.get('between_pages_max', 10)),
+            ))
+
+        log('小红书列表完成 keyword=%s %d 条' % (keyword[:30], len(results)))
+    except Exception as e:
+        return {
+            'records': results,
+            'page': page,
+            'ctx': ctx,
+            'items_by_link': items_by_link,
+            'error': str(e)[:200],
+        }
+    return {
+        'records': results,
+        'page': page,
+        'ctx': ctx,
+        'items_by_link': items_by_link,
+    }
+
+
 def _investigation_detail_cfg(x):
     inv = dict(x.get('investigation_detail') or {})
     inv.setdefault('dom_miss_skip', True)
@@ -941,11 +1217,10 @@ def fetch_xhs_details_by_urls(urls_or_items, managed_session=True, log_fn=None, 
         if not keyword:
             return False, 'missing_keyword'
         search_url = x['search_url_template'].format(keyword=keyword)
-        cur = page.url or ''
-        if keyword not in cur or 'search_result' not in cur:
-            page.goto(search_url, timeout=timeout, wait_until='domcontentloaded')
-            time.sleep(after_wait)
-        if not xhs_wait_if_search_blocked(ctx, page, S, search_url, timeout, after_wait):
+        if not xhs_open_search_page(
+            ctx, page, keyword, S,
+            search_url=search_url, timeout_ms=timeout, after_wait_sec=after_wait,
+        ):
             return False, 'login_required'
         return True, ''
 
@@ -977,7 +1252,7 @@ def fetch_xhs_details_by_urls(urls_or_items, managed_session=True, log_fn=None, 
             _log('Chrome 未就绪', 'ERROR')
             return results
         ctx = connect_cdp()
-        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        page = get_active_page(ctx, 'xhs')
         if not ensure_login_for_detail(ctx, page, 'xhs', True, S):
             _log('小红书登录未完成', 'ERROR')
             return results
@@ -1466,6 +1741,13 @@ from intel.db import get_connection
 from intel.api import register_intel_routes
 
 get_connection()
+try:
+    from intel.db import reclaim_orphaned_task_runs, reclaim_zombie_task_runs
+    _n = reclaim_orphaned_task_runs() + reclaim_zombie_task_runs(grace_sec=0)
+    if _n:
+        print('[startup] 已收尾 %d 个未结束的监测 Run' % _n)
+except Exception as _e:
+    print('[startup] Run 收尾检查失败: %s' % _e)
 register_intel_routes(app)
 register_admin_routes(app)
 

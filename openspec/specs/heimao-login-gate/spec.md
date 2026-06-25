@@ -49,18 +49,57 @@
 
 ### 需求：搜索无结果时触发登录等待
 
-#### 场景：无投诉链接且无 sid
-
-- **当** 搜索 HTML 中投诉链接数为 0
-- **且** 无可用 sid 时
-- **则** `heimao_wait_if_search_empty` 必须进入 `WAITING_LOGIN`
-- **且** 成功后须通过 `redo_search` 回调重新搜索
+搜索 HTML 中投诉链接数为 0 时，系统 MUST 先分类空搜索原因；**仅**在明确登录失效时进入 `WAITING_LOGIN`。不得仅因缺少 sid 且无链接而触发登录等待（除非 `heimao.empty_search.login_on_missing_sid=true`）。除登录恢复外，**不得**对空搜索结果执行重搜或重试。
 
 #### 场景：有 sid 但无链接
 
-- **当** 存在 sid 但关键词无链接时
-- **则** 系统必须记录警告并继续（可能确无结果）
+- **当** 存在 sid 但关键词无投诉链接
+- **则** 系统 MUST 记录警告
+- **且** MUST 立即结束当前关键词爬取（返回空结果）
+- **且** MUST NOT 重搜或进入 `WAITING_LOGIN`
 
+#### 场景：无 sid 但微博 SUB 有效且无登录墙
+
+- **当** 投诉链接数为 0
+- **且** 无 sid
+- **且** `heimao_browser_has_weibo_session` 为 true
+- **且** 页面无 `heimao_page_shows_login_prompt` 与 `page_has_login_fail_text`
+- **则** `heimao_wait_if_search_empty` MUST NOT 调用 `wait_for_site_login`
+- **且** MUST 记录「无 sid，会话仍有效，跳过」类 WARN
+- **且** MUST 立即结束当前关键词并继续下一关键词或合作方
+- **且** MUST NOT 重搜
+
+#### 场景：明确登录失效
+
+- **当** 投诉链接数为 0
+- **且** 满足以下任一：`heimao_browser_has_weibo_session` 为 false；页面出现登录墙或 `login_fail_texts`；或 `heimao.empty_search.login_on_missing_sid=true` 且无 sid
+- **则** `heimao_wait_if_search_empty` MUST 进入 `WAITING_LOGIN`
+- **且** 登录成功后 MUST 通过 `redo_search` 回调重新搜索（**唯一**允许的空搜 redo 路径）
+
+#### 场景：页面过短或明显拦截
+
+- **当** 投诉链接数为 0
+- **且** HTML 长度低于 `heimao.min_html_len`
+- **且** 无法确认为「正常空结果页」
+- **则** 系统 MUST 按登录/拦截处理并 MAY 进入 `WAITING_LOGIN`
+
+### 需求：黑猫空搜不重试直接跳过
+
+系统 SHALL 在黑猫关键词搜索无投诉链接时立即跳过，不进行 `empty_page_retry` 或其他空结果重试。
+
+#### 场景：第 1 页无链接即跳过
+
+- **当** 搜索后投诉链接数为 0
+- **且** 分类为 `no_results` 或 `empty_uncertain`
+- **则** `crawl_heimao` MUST 返回空列表
+- **且** MUST NOT 调用 `_redo_heimao_search`（除非刚完成登录恢复的 `redo_search`）
+- **且** `heimao.early_stop.empty_page_retry` 默认 MUST 为 `0`
+
+#### 场景：继续下一关键词
+
+- **当** 当前关键词因空结果被跳过
+- **则** heimao CrawlAdapter MUST 立即进入下一关键词或下一合作方
+- **且** RunMetrics MUST 递增 `heimao_skipped_empty`
 ### 需求：详情鉴权失败判定
 
 #### 场景：黑猫详情页

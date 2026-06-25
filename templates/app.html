@@ -19,16 +19,6 @@
     <a href="/docs/intel-api" target="_blank" class="header-link">API</a>
   </div>
 </div>
-<div class="status-bar">
-        <div class="status-item"><div class="status-dot" id="dot-browser"></div><span>Chrome</span></div>
-        <div class="status-item"><div class="status-dot" id="dot-heimao"></div><span>黑猫: <span class="status-count" id="count-heimao">0</span></span></div>
-        <div class="status-item"><div class="status-dot" id="dot-xhs"></div><span>小红书: <span class="status-count" id="count-xhs">0</span></span></div>
-        <div id="running-info" style="color:#f59e0b;font-size:13px"></div>
-        <div style="flex:1"></div>
-        <button class="btn btn-gray btn-sm" onclick="App.switchAppTab('system')">⚙️ 系统配置</button>
-        <button class="btn btn-red btn-sm" onclick="stopAll()">⏹ 停止</button>
-        <button class="btn btn-gray btn-sm" onclick="clearAll()">🗑️</button>
-    </div>
     <div class="login-wait-banner" id="login-wait-banner">
         <strong id="login-wait-title">等待登录</strong>
         <span id="login-wait-detail"></span>
@@ -40,7 +30,26 @@
         — 请前往 <a href="/?tab=cookies" style="color:#fca5a5;text-decoration:underline">Cookie 实例</a> 更新凭证并重新诊断。
     </div>
 <div class="app-shell">
-  <nav class="app-nav"><a href="#" data-tab="home">首页看板</a><a href="#" data-tab="intel">情报中心</a><a href="#" data-tab="raw">源数据</a><a href="#" data-tab="partners">合作方</a><a href="#" data-tab="tasks">监测任务</a><a href="#" data-tab="sources">数据源</a><a href="#" data-tab="cookies">Cookie 实例</a><a href="#" data-tab="crawl">采集调试</a><a href="#" data-tab="system">系统设置</a><a href="#" data-tab="analysis">大模型</a></nav>
+  <nav class="app-nav" id="appNav">
+    <a href="#" data-tab="home">首页看板</a>
+    <a href="#" data-tab="intel">情报中心</a>
+    <a href="#" data-tab="raw">源数据</a>
+    <a href="#" data-tab="partners">合作方</a>
+    <a href="#" data-tab="tasks">监测任务</a>
+    <div class="app-nav-group" id="navGroupSettings" data-nav-group="settings">
+      <button type="button" class="app-nav-group-title" id="navSettingsToggle" aria-expanded="false" aria-controls="navSettingsSub">
+        <span class="app-nav-group-label">设置</span>
+        <span class="app-nav-chevron" aria-hidden="true">▾</span>
+      </button>
+      <div class="app-nav-sub" id="navSettingsSub">
+        <a href="#" data-tab="sources">数据源</a>
+        <a href="#" data-tab="cookies">Cookie 实例</a>
+        <a href="#" data-tab="crawl">采集调试</a>
+        <a href="#" data-tab="system">系统设置</a>
+        <a href="#" data-tab="analysis">大模型</a>
+      </div>
+    </div>
+  </nav>
   <main class="app-main">
     <div id="panel-home" class="app-panel active">
       <div class="card">
@@ -124,6 +133,7 @@
       <div id="rawDetailView" style="display:none"><div id="rawDetailContent"></div></div>
     </div>
     <div id="panel-partners" class="app-panel">
+      <div id="partnerListView">
       <div class="card">
         <div class="card-head">
           <h2>合作方列表</h2>
@@ -135,14 +145,68 @@
         <div class="table-wrap scroll-sm">
           <table class="table-partners">
             <thead><tr>
-              <th>ID</th><th>名称</th><th>别名</th><th>排除词</th><th>监测词</th><th>状态</th><th>更新时间</th><th>操作</th>
+              <th>ID</th><th>名称</th><th>情报</th><th>源数据</th><th>别名</th><th>排除词</th><th>监测词</th><th>状态</th><th>更新时间</th><th class="col-actions">操作</th>
             </tr></thead>
-            <tbody id="partnerTableBody"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
+            <tbody id="partnerTableBody"><tr><td colspan="10" class="empty">加载中…</td></tr></tbody>
           </table>
+        </div>
+      </div>
+      </div>
+      <div id="partnerDetailView" style="display:none">
+        <div class="detail-head partner-detail-head">
+          <button class="btn btn-gray btn-sm" onclick="backToPartnerList()">← 返回列表</button>
+          <div class="partner-detail-title-wrap">
+            <h2 id="partnerDetailTitle">合作方</h2>
+            <div id="partnerDetailTags" class="partner-detail-tags"></div>
+          </div>
+          <button class="btn btn-gray btn-sm admin-only-save" id="partnerDetailPurgeBtn" style="margin-left:auto" onclick="openPurgeModalFromPartnerDetail()">清理数据</button>
+        </div>
+        <div class="tab-bar partner-subtabs">
+          <div class="tab" data-partner-tab="intel" onclick="switchPartnerSubTab('intel', this)">情报</div>
+          <div class="tab" data-partner-tab="raw" onclick="switchPartnerSubTab('raw', this)">源数据</div>
+        </div>
+        <div id="partnerIntelPane" class="partner-detail-pane">
+          <div class="card">
+            <div class="toolbar">
+              <h2>关联情报 <span id="partnerIntelCount" class="meta"></span></h2>
+              <span class="meta">仅显示中及以上相关度</span>
+            </div>
+            <div class="table-wrap scroll">
+              <table>
+                <thead><tr>
+                  <th>来源</th><th data-field-key="relevance">相关度</th><th data-field-key="sentiment_label">情感</th><th data-field-key="risk_types">风险类型</th><th data-field-key="published_at">发布时间</th><th data-field-key="captured_at">采集时间</th><th data-field-key="summary">摘要</th><th>操作</th>
+                </tr></thead>
+                <tbody id="partnerIntelTableBody"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <div id="partnerRawPane" class="partner-detail-pane" style="display:none">
+          <div id="partnerRawNoTasks" class="partner-empty-state" style="display:none">
+            <p class="meta">该合作方尚未关联监测任务，无法查看源数据。</p>
+            <button class="btn btn-gray btn-sm" onclick="App.setQuery({tab:'tasks'});App.switchAppTab('tasks')">前往监测任务</button>
+          </div>
+          <div id="partnerRawWithTasks">
+            <div class="filter-bar filters partner-raw-filters">
+              <div class="field"><label>监测任务</label><select id="partnerRawTask" onchange="onPartnerRawTaskChange()"></select></div>
+              <div class="btn-group" style="margin:0">
+                <button class="btn btn-primary btn-sm" onclick="loadPartnerRawRecords()">刷新</button>
+              </div>
+            </div>
+            <div class="card">
+              <h2>关联源数据 <span id="partnerRawCount" class="meta"></span></h2>
+              <div class="table-wrap scroll">
+                <table><thead><tr><th>ID</th><th>任务</th><th>来源</th><th>关键词</th><th>摘要</th><th data-field-key="published_at">发布时间</th><th>采集</th><th>分析</th></tr></thead>
+                <tbody id="partnerRawTableBody"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
     <div id="panel-tasks" class="app-panel">
+      <div id="taskListView">
       <div class="card">
         <div class="card-head">
           <h2>监测任务列表</h2>
@@ -159,6 +223,72 @@
             </tr></thead>
             <tbody id="taskTableBody"><tr><td colspan="9" class="empty">加载中…</td></tr></tbody>
           </table>
+        </div>
+      </div>
+      </div>
+      <div id="taskDetailView" class="task-detail-view" style="display:none">
+        <div class="detail-head partner-detail-head task-detail-head">
+          <button type="button" class="btn btn-gray btn-sm task-detail-back" onclick="backToTaskList()">← 返回列表</button>
+          <div class="partner-detail-title-wrap task-detail-title-wrap">
+            <h2 id="taskDetailTitle">监测任务</h2>
+            <div id="taskDetailTags" class="partner-detail-tags task-detail-tags"></div>
+          </div>
+          <div class="task-detail-action-bar" id="taskDetailActionBar"></div>
+        </div>
+        <div class="tab-bar task-subtabs">
+          <div class="tab active" data-task-tab="overview" onclick="switchTaskSubTab('overview', this)">概览</div>
+          <div class="tab" data-task-tab="runs" onclick="switchTaskSubTab('runs', this)">执行历史</div>
+          <div class="tab" data-task-tab="subtasks" onclick="switchTaskSubTab('subtasks', this)">执行子任务</div>
+          <div class="tab" data-task-tab="raw" onclick="switchTaskSubTab('raw', this)">源数据</div>
+          <div class="tab" data-task-tab="intel" onclick="switchTaskSubTab('intel', this)">情报</div>
+        </div>
+        <div id="taskOverviewPane" class="partner-detail-pane">
+          <div id="taskDetailOverviewBody"></div>
+        </div>
+        <div id="taskRunsPane" class="partner-detail-pane" style="display:none">
+          <div class="card">
+            <div class="card-head">
+              <h2>执行历史</h2>
+              <button type="button" class="btn btn-gray btn-sm" onclick="loadTaskDetailRuns(true)">刷新</button>
+            </div>
+            <div id="taskDetailRunsBody"><p class="meta">加载中…</p></div>
+          </div>
+        </div>
+        <div id="taskSubtasksPane" class="partner-detail-pane" style="display:none">
+          <div class="card">
+            <div class="card-head">
+              <h2>子任务（按数据源）</h2>
+              <div class="btn-group">
+                <select id="taskDetailSubtaskRun" onchange="onTaskDetailSubtaskRunChange()"></select>
+                <button type="button" class="btn btn-gray btn-sm" onclick="loadTaskDetailSubtasks()">刷新</button>
+              </div>
+            </div>
+            <div id="taskDetailSubtasksBody"><p class="meta">加载中…</p></div>
+          </div>
+        </div>
+        <div id="taskRawPane" class="partner-detail-pane" style="display:none">
+          <div class="card">
+            <div class="card-head">
+              <h2>源数据 <span id="taskDetailRawCount" class="meta"></span></h2>
+              <button type="button" class="btn btn-gray btn-sm" onclick="loadTaskDetailRaw()">刷新</button>
+            </div>
+            <div class="table-wrap scroll">
+              <table><thead><tr><th>ID</th><th>合作方</th><th>来源</th><th>关键词</th><th>摘要</th><th>采集</th><th>分析</th></tr></thead>
+              <tbody id="taskDetailRawBody"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody></table>
+            </div>
+          </div>
+        </div>
+        <div id="taskIntelPane" class="partner-detail-pane" style="display:none">
+          <div class="card">
+            <div class="card-head">
+              <h2>情报 <span id="taskDetailIntelCount" class="meta"></span></h2>
+              <button type="button" class="btn btn-gray btn-sm" onclick="loadTaskDetailIntel()">刷新</button>
+            </div>
+            <div class="table-wrap scroll">
+              <table><thead><tr><th>合作方</th><th>来源</th><th>相关度</th><th>情感</th><th>摘要</th><th>采集</th><th>操作</th></tr></thead>
+              <tbody id="taskDetailIntelBody"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody></table>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -282,6 +412,8 @@
         <h2>Chrome 浏览器</h2>
         <p class="config-hint" style="margin-bottom:12px">首次使用请先启动 Chrome（CDP 9222）</p>
         <button class="btn btn-primary" onclick="launchChrome()">启动 Chrome</button>
+        <button class="btn btn-red btn-sm" onclick="stopAll()">停止爬取</button>
+        <button class="btn btn-gray btn-sm" onclick="clearAll()">清空结果</button>
         <span id="auth-badge" class="config-hint" style="margin-left:12px"></span>
         <p id="auth-status-text" class="config-hint" style="margin-top:8px"></p>
     </div>
@@ -325,7 +457,7 @@
                 <span class="toggle-label">启用多进程 Worker（监测 Run：heimao ∥ xhs 并行）</span>
             </div>
             <p id="cfg-workers-summary" class="config-hint" style="margin-top:8px"></p>
-            <p class="config-hint">Worker 实例端口、Profile、Cookie 文件在 <code>config.json → monitor.workers</code> 配置；Cookie 上传与诊断见 <a href="/?tab=cookies" style="color:#3b82f6">Cookie 实例</a> Tab。修改 instances 可用下方「JSON 高级」。</p>
+            <p class="config-hint">Worker 实例端口、Profile、Cookie 文件在 <code>config.json → monitor.workers</code> 配置；Cookie 上传与诊断见<strong>设置 → Cookie 实例</strong>。修改 instances 可用下方「JSON 高级」。</p>
         </div>
 
         <div class="config-section" id="cfg-heimao">
@@ -361,7 +493,7 @@
         </div>
 
         <div class="config-section" id="cfg-auth">
-            <p class="config-hint" style="margin-bottom:12px">用于<strong>采集调试</strong> Tab 的手工爬取登录辅助。监测 Run 的 Worker Cookie 请用 <a href="/?tab=cookies" style="color:#3b82f6">Cookie 实例</a>。获取方法见 <a href="/docs/credentials" target="_blank" style="color:#3b82f6">如何获取登录凭证</a></p>
+            <p class="config-hint" style="margin-bottom:12px">用于<strong>设置 → 采集调试</strong>的手工爬取登录辅助。监测 Run 的 Worker Cookie 请用<strong>设置 → Cookie 实例</strong>。获取方法见 <a href="/docs/credentials" target="_blank" style="color:#3b82f6">如何获取登录凭证</a></p>
             <div class="field-grid">
                 <div class="field"><label>黑猫 Cookie 文件路径</label><input id="cfg-auth-h-file" type="text"></div>
                 <div class="field"><label>小红书 Cookie 文件路径</label><input id="cfg-auth-x-file" type="text"></div>
@@ -456,7 +588,20 @@
   <div class="field"><label>别名（逗号分隔）</label><input id="pAliases" placeholder="品牌A, 子公司B"></div>
   <div class="field"><label>排除词</label><input id="pExclude" placeholder="误匹配词"></div>
   <div class="field"><label>额外监测词</label><input id="pMonitorKw" placeholder="可选"></div>
-  <div class="field"><label>行业 cohort</label><input id="pCohort" placeholder="如：新能源整车"></div>
+  <div class="field-grid">
+    <div class="field"><label>小红书超时(秒)</label><input id="pTimeoutXhs" type="number" min="60" placeholder="留空=全局默认"></div>
+    <div class="field"><label>黑猫超时(秒)</label><input id="pTimeoutHeimao" type="number" min="60" placeholder="留空=全局默认"></div>
+  </div>
+  <p class="muted" style="margin:-4px 0 10px;font-size:12px">按合作方覆盖单数据源最大爬取时间；数据量大的合作方可单独加长，避免 keyword 子任务超时。</p>
+  <div class="field cohort-field">
+    <label>行业 cohort</label>
+    <div class="cohort-row">
+      <input id="pCohort" placeholder="如：新能源整车">
+      <button type="button" class="btn btn-sm" id="pCohortSuggestBtn">获取推荐</button>
+    </div>
+    <p class="muted cohort-hint" style="margin:4px 0 8px;font-size:12px">开放标签，同 cohort 合作方会合并监测关键词；可留空。点击推荐仅填入输入框，不会自动保存。</p>
+    <div id="pCohortSuggestChips" class="cohort-suggest-chips"></div>
+  </div>
   <div class="field"><label>优先级</label><select id="pPriorityTier"><option value="P0">P0 重点</option><option value="P1" selected>P1 常规</option><option value="P2">P2 低频</option></select></div>
   <div class="field"><label>备注</label><textarea id="pNotes" rows="2"></textarea></div>
   <div class="field-row"><input type="checkbox" id="pEnabled" checked><label for="pEnabled" class="toggle-label">启用</label></div>
@@ -464,12 +609,28 @@
 <div id="taskFormFields" class="hidden-form-fields" aria-hidden="true">
   <input type="hidden" id="editingTaskId" value="">
   <div class="field"><label>任务名称</label><input id="tName" placeholder="例如：2026-06 周扫"></div>
-  <div class="field"><label>合作方 *</label><div id="tPartnerChecks" class="partner-checks"><span class="muted">请先添加合作方</span></div></div>
+  <div class="field partner-picker-field">
+    <div class="field-label-row">
+      <label>合作方 *</label>
+      <span id="tPartnerCheckSummary" class="muted partner-check-summary">已选 0 / 0</span>
+    </div>
+    <div class="partner-picker-toolbar">
+      <input type="search" id="tPartnerFilter" class="partner-filter-input" placeholder="搜索名称、别名或 cohort…" autocomplete="off">
+      <div class="partner-picker-actions">
+        <button type="button" class="btn btn-sm btn-gray" id="tPartnerSelectAll">全选</button>
+        <button type="button" class="btn btn-sm btn-gray" id="tPartnerSelectNone">全不选</button>
+        <button type="button" class="btn btn-sm btn-gray" id="tPartnerSelectInvert">反选</button>
+      </div>
+    </div>
+    <div id="tPartnerQuickPick" class="partner-quick-pick"></div>
+    <div id="tPartnerChecks" class="partner-checks"><span class="muted">请先添加合作方</span></div>
+  </div>
   <div class="field"><label>数据来源</label><div id="tSourceChecks" class="source-checks"></div></div>
   <div class="field"><label>采集页数</label><input id="tPages" type="number" value="2" min="1"></div>
   <div class="field" id="tCrawlModeField"><label>黑猫爬取模式（单源 fallback）</label><select id="tCrawlMode"><option value="list_first">列表优先</option><option value="legacy" selected>Legacy（合作方×源）</option></select></div>
   <p id="tCrawlModeNote" class="muted" style="margin:6px 0 10px;font-size:12px">混合源任务：爬取策略由<strong>数据源配置</strong>决定（黑猫 legacy / 小红书 list_first）。仅当任务<strong>仅含黑猫</strong>时，上方选项作为 fallback。</p>
   <div class="field-row"><input type="checkbox" id="tFetchDetail"><label for="tFetchDetail" class="toggle-label">Legacy 模式抓取详情</label></div>
+  <div class="field"><label>忽略早于（不分析，仍入库）</label><input id="tIgnoreBefore" type="date"><span class="config-hint">留空表示不限制；按内容发布时间 published_at 比较，日期缺失仍分析</span></div>
   <div class="field schedule-block">
     <div class="field-row"><input type="checkbox" id="tScheduleEnabled"><label for="tScheduleEnabled" class="toggle-label">启用定时执行（增量）</label></div>
     <div id="scheduleFields" style="display:none;margin-top:10px">
@@ -486,6 +647,16 @@
       <p id="tSchedulePreview" class="meta" style="margin-top:8px"></p>
     </div>
   </div>
+</div>
+<div id="purgeFormFields" class="hidden-form-fields" aria-hidden="true">
+  <input type="hidden" id="purgePresetPartnerId" value="">
+  <div class="field"><label>清理类型</label>
+    <select id="purgeKind"><option value="intel">情报</option><option value="raw">源数据</option></select>
+  </div>
+  <div class="field"><label>监测任务 *</label><select id="purgeTaskId"></select></div>
+  <div class="field"><label>合作方（可选）</label><select id="purgePartnerId"><option value="">全部合作方</option></select></div>
+  <div class="field"><label>发布时间早于（可选）</label><input id="purgePublishedBefore" type="date"><span class="config-hint">仅删除 published_at 早于该日期的记录；空日期不匹配</span></div>
+  <p id="purgePreviewMsg" class="meta"></p>
 </div>
 <script src="/static/field-labels.js"></script>
 <script src="/static/ui-shell.js"></script>
