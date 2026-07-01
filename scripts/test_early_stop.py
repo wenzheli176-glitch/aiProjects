@@ -21,10 +21,12 @@ def test_heimao_default_empty_page_retry_zero():
 
 
 def test_heimao_empty_page_stop():
-    es = early_stop_cfg('heimao', {'early_stop': {'enabled': True, 'empty_pages_threshold': 1, 'min_pages': 1}})
-    stop, reason, c = heimao_should_stop_after_page(es, 2, 5, 0, 0)
+    es = early_stop_cfg('heimao', {'early_stop': {'enabled': True, 'protect_first_page': True}})
+    stop, reason, c = heimao_should_stop_after_page(es, 1, 5, 0, 0)
     assert stop and reason == 'empty_page'
-    assert c == 1
+    assert c == 0
+    stop, reason, c = heimao_should_stop_after_page(es, 2, 5, 0, 0)
+    assert not stop
     print('OK test_heimao_empty_page_stop')
 
 

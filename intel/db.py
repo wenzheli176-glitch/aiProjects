@@ -14,7 +14,7 @@ _db_lock = threading.RLock()
 _local = threading.local()
 _conn = None  # 兼容旧测试代码
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 INTEL_SCHEMA_VERSION = '1.1'
 
 DEFAULT_SCHEDULE = {
@@ -417,6 +417,15 @@ def _migrate_schema(conn):
         conn.execute(
             "ALTER TABLE monitor_task_runs ADD COLUMN source_halt_json TEXT NOT NULL DEFAULT '{}'"
         )
+    if 'crawl_only' not in run_cols:
+        conn.execute(
+            "ALTER TABLE monitor_task_runs ADD COLUMN crawl_only INTEGER NOT NULL DEFAULT 0"
+        )
+    task_cols3 = {r[1] for r in conn.execute('PRAGMA table_info(monitor_tasks)').fetchall()}
+    if 'crawl_only' not in task_cols3:
+        conn.execute(
+            "ALTER TABLE monitor_tasks ADD COLUMN crawl_only INTEGER NOT NULL DEFAULT 0"
+        )
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS crawl_work_queue (
@@ -470,6 +479,50 @@ def _migrate_schema(conn):
         CREATE INDEX IF NOT EXISTS idx_kw_runs_task ON monitor_keyword_runs(task_id, status);
         """
     )
+    llm_cols = {r[1] for r in conn.execute('PRAGMA table_info(llm_usage_logs)').fetchall()}
+    if not llm_cols:
+        conn.executescript(
+            """
+            CREATE TABLE llm_usage_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER,
+                run_id INTEGER,
+                phase TEXT NOT NULL DEFAULT 'analysis',
+                job_id INTEGER,
+                batch_index INTEGER NOT NULL DEFAULT 0,
+                partner_name TEXT NOT NULL DEFAULT '',
+                item_count INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'ok',
+                model TEXT NOT NULL DEFAULT '',
+                latency_ms INTEGER NOT NULL DEFAULT 0,
+                prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                completion_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0,
+                items_written INTEGER NOT NULL DEFAULT 0,
+                attempt INTEGER NOT NULL DEFAULT 1,
+                error_message TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (task_id) REFERENCES monitor_tasks(id) ON DELETE SET NULL
+            );
+            CREATE INDEX idx_llm_usage_created ON llm_usage_logs(created_at);
+            CREATE INDEX idx_llm_usage_task ON llm_usage_logs(task_id);
+            CREATE INDEX idx_llm_usage_phase ON llm_usage_logs(phase);
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO llm_usage_logs(
+                task_id, run_id, phase, job_id, batch_index, partner_name, item_count,
+                status, model, latency_ms, prompt_tokens, completion_tokens, total_tokens,
+                items_written, attempt, error_message, created_at
+            )
+            SELECT
+                task_id, NULL, 'analysis', job_id, batch_index, partner_name, item_count,
+                status, model, latency_ms, prompt_tokens, completion_tokens, total_tokens,
+                items_written, attempt, error_message, created_at
+            FROM analysis_job_logs
+            """
+        )
     conn.execute(
         "UPDATE schema_meta SET value=? WHERE key='db_schema_version'",
         (str(SCHEMA_VERSION),),
@@ -799,6 +852,7 @@ def _row_task(row, partner_ids=None, sources=None):
         'error_message': row['error_message'] or '',
         'schedule': schedule,
         'last_run_id': row['last_run_id'] if 'last_run_id' in keys else None,
+        'crawl_only': bool(row['crawl_only']) if 'crawl_only' in keys else False,
         'created_at': row['created_at'],
         'updated_at': row['updated_at'],
         'started_at': row['started_at'],
@@ -839,12 +893,13 @@ def create_monitor_task(data):
     sources = data.get('sources') or cfg('monitor', 'default_sources', default=['heimao', 'xhs'])
     crawl_mode = data.get('crawl_mode') or cfg('monitor', 'crawl_mode', default='list_first')
     business_spec = data.get('business_spec') if isinstance(data.get('business_spec'), dict) else {}
+    crawl_only = 1 if data.get('crawl_only') else 0
     cur = conn.execute(
         """
         INSERT INTO monitor_tasks(name, status, sources_json, max_pages, fetch_detail,
-                                  crawl_mode, business_spec_json,
+                                  crawl_mode, business_spec_json, crawl_only,
                                   progress_json, created_at, updated_at)
-        VALUES (?, 'queued', ?, ?, ?, ?, ?, '{}', ?, ?)
+        VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, '{}', ?, ?)
         """,
         (
             data.get('name') or ('监测任务 %s' % now[:16]),
@@ -853,6 +908,7 @@ def create_monitor_task(data):
             1 if data.get('fetch_detail', False) else 0,
             crawl_mode,
             json.dumps(business_spec, ensure_ascii=False),
+            crawl_only,
             now,
             now,
         ),
@@ -907,19 +963,22 @@ def _row_task_run(row):
         'pause_requested': bool(row['pause_requested']) if 'pause_requested' in keys else False,
         'source_halt': _json_col('source_halt_json') if 'source_halt_json' in keys else {},
         'worker_state': _json_col('worker_state_json') if 'worker_state_json' in keys else {},
+        'crawl_only': bool(row['crawl_only']) if 'crawl_only' in keys else False,
     }
 
 
-def create_task_run(task_id, trigger='manual', analyze_mode='incremental', status='running'):
+def create_task_run(
+    task_id, trigger='manual', analyze_mode='incremental', status='running', crawl_only=False,
+):
     conn = get_connection()
     now = _utc_now()
     cur = conn.execute(
         """
         INSERT INTO monitor_task_runs(
-            task_id, trigger, analyze_mode, status, started_at
-        ) VALUES (?, ?, ?, ?, ?)
+            task_id, trigger, analyze_mode, status, started_at, crawl_only
+        ) VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (task_id, trigger, analyze_mode, status, now),
+        (task_id, trigger, analyze_mode, status, now, 1 if crawl_only else 0),
     )
     conn.commit()
     return cur.lastrowid
@@ -1227,6 +1286,60 @@ def find_resumable_run_id(task_id, task=None):
     return progress.get('resume_run_id') or task.get('last_run_id')
 
 
+def _pt_triage_ms(pt):
+    pt = pt or {}
+    return int(pt.get('triage_ms') or pt.get('analyze_ms') or 0)
+
+
+def _normalize_phase_timing(timing):
+    t = timing or {}
+    list_ms = int(t.get('list_crawl_ms') or 0)
+    triage_ms = _pt_triage_ms(t)
+    invest_ms = int(t.get('investigation_ms') or 0)
+    return {
+        'list_crawl_ms': list_ms,
+        'triage_ms': triage_ms,
+        'investigation_ms': invest_ms,
+    }
+
+
+def _source_timing_bucket_from_subtasks(bucket):
+    """将子任务汇总 bucket 规范为 timing_by_source 字段。"""
+    list_ms = int(bucket.get('list_crawl_ms') or bucket.get('crawl_ms') or 0)
+    triage_ms = int(bucket.get('triage_ms') or 0)
+    invest_ms = int(bucket.get('investigation_crawl_ms') or 0)
+    return {
+        'list_crawl_ms': list_ms,
+        'crawl_ms': list_ms,
+        'triage_ms': triage_ms,
+        'investigation_crawl_ms': invest_ms,
+        'raw_new': int(bucket.get('raw_new') or 0),
+        'intel_written': int(bucket.get('intel_written') or 0),
+    }
+
+
+def _merge_source_timing_with_intel(existing, subtask_bucket):
+    """子任务三阶段以汇总为准；情报分析耗时保留 run_metrics 中的 intel_analyze_ms。"""
+    base = _source_timing_bucket_from_subtasks(subtask_bucket)
+    intel_ms = int((existing or {}).get('intel_analyze_ms') or 0)
+    if not intel_ms:
+        legacy = int((existing or {}).get('analyze_ms') or 0)
+        triage_ms = int(base.get('triage_ms') or 0)
+        if legacy > triage_ms:
+            intel_ms = legacy - triage_ms
+        elif legacy and not triage_ms:
+            intel_ms = legacy
+    base['intel_analyze_ms'] = intel_ms
+    base['analyze_ms'] = intel_ms
+    base['raw_updated'] = int((existing or {}).get('raw_updated') or 0)
+    base['raw_new'] = max(int(base.get('raw_new') or 0), int((existing or {}).get('raw_new') or 0))
+    base['intel_written'] = max(
+        int(base.get('intel_written') or 0),
+        int((existing or {}).get('intel_written') or 0),
+    )
+    return base
+
+
 def aggregate_subtask_timing_by_source(run_id):
     """从 keyword / 队列子任务 phase_timing_ms 汇总 per-source timing。"""
     from intel.crawl_queue import list_queue_items_for_run
@@ -1241,16 +1354,18 @@ def aggregate_subtask_timing_by_source(run_id):
         if not sid:
             return
         bucket = by_source.setdefault(sid, {
+            'list_crawl_ms': 0,
             'crawl_ms': 0,
+            'triage_ms': 0,
             'investigation_crawl_ms': 0,
-            'analyze_ms': 0,
             'raw_new': 0,
             'intel_written': 0,
         })
         pt = phase_timing or {}
+        bucket['list_crawl_ms'] += int(pt.get('list_crawl_ms') or 0)
         bucket['crawl_ms'] += int(pt.get('list_crawl_ms') or 0)
+        bucket['triage_ms'] += _pt_triage_ms(pt)
         bucket['investigation_crawl_ms'] += int(pt.get('investigation_ms') or 0)
-        bucket['analyze_ms'] += int(pt.get('analyze_ms') or 0)
 
     for kw in list_keyword_runs(run_id=run_id):
         if kw.get('source_id') and kw['source_id'] not in source_ids:
@@ -1274,7 +1389,7 @@ def aggregate_subtask_timing_by_source(run_id):
 
 
 def merge_run_metrics_from_subtasks(run_id, run_metrics):
-    """用子任务 phase_timing 补全 RunMetrics 中缺失的 timing。"""
+    """用子任务 phase_timing 校准爬取阶段 timing；情报分析耗时保留 run_metrics。"""
     if not run_id:
         return run_metrics
     by_source = aggregate_subtask_timing_by_source(run_id)
@@ -1284,61 +1399,35 @@ def merge_run_metrics_from_subtasks(run_id, run_metrics):
         from intel.run_metrics import RunMetrics
         run_metrics = RunMetrics()
 
-    crawl_total = 0
+    crawl_phase_total = 0
+    triage_total = 0
     investigation_total = 0
-    analyze_total = 0
     for sid, bucket in by_source.items():
-        crawl_total += int(bucket.get('crawl_ms') or 0)
-        investigation_total += int(bucket.get('investigation_crawl_ms') or 0)
-        analyze_total += int(bucket.get('analyze_ms') or 0)
         existing = run_metrics.timing_by_source.get(sid) or {}
-        run_metrics.timing_by_source[sid] = {
-            'crawl_ms': max(int(existing.get('crawl_ms') or 0), int(bucket.get('crawl_ms') or 0)),
-            'investigation_crawl_ms': max(
-                int(existing.get('investigation_crawl_ms') or 0),
-                int(bucket.get('investigation_crawl_ms') or 0),
-            ),
-            'analyze_ms': max(int(existing.get('analyze_ms') or 0), int(bucket.get('analyze_ms') or 0)),
-            'raw_new': max(int(existing.get('raw_new') or 0), int(bucket.get('raw_new') or 0)),
-            'raw_updated': int(existing.get('raw_updated') or 0),
-            'intel_written': max(int(existing.get('intel_written') or 0), int(bucket.get('intel_written') or 0)),
-        }
-    if run_metrics.crawl_duration_ms <= 0 and crawl_total > 0:
-        run_metrics.crawl_duration_ms = crawl_total
-    if run_metrics.investigation_crawl_duration_ms <= 0 and investigation_total > 0:
-        run_metrics.investigation_crawl_duration_ms = investigation_total
-    if run_metrics.analyze_duration_ms <= 0 and analyze_total > 0:
-        run_metrics.analyze_duration_ms = analyze_total
+        merged = _merge_source_timing_with_intel(existing, bucket)
+        run_metrics.timing_by_source[sid] = merged
+        list_ms = int(merged.get('list_crawl_ms') or 0)
+        triage_ms = int(merged.get('triage_ms') or 0)
+        invest_ms = int(merged.get('investigation_crawl_ms') or 0)
+        crawl_phase_total += list_ms + triage_ms + invest_ms
+        triage_total += triage_ms
+        investigation_total += invest_ms
+
+    run_metrics.crawl_duration_ms = crawl_phase_total
+    run_metrics.triage_duration_ms = triage_total
+    run_metrics.investigation_crawl_duration_ms = investigation_total
     return run_metrics
 
 
 def _timing_from_subtasks_or_run(run_id, run_timing=None):
-    """优先使用 Run 记录 timing；缺失时从子任务汇总。"""
-    if isinstance(run_timing, dict) and run_timing:
-        has_data = any(
-            int((bucket or {}).get('crawl_ms') or 0)
-            + int((bucket or {}).get('investigation_crawl_ms') or 0)
-            + int((bucket or {}).get('analyze_ms') or 0)
-            for bucket in run_timing.values()
-        )
-        if has_data:
-            return run_timing
+    """以子任务 phase_timing 汇总为准，合并 run 级情报分析耗时。"""
     rebuilt = aggregate_subtask_timing_by_source(run_id)
     if not rebuilt:
         return run_timing if isinstance(run_timing, dict) else {}
     merged = dict(run_timing or {}) if isinstance(run_timing, dict) else {}
     for sid, bucket in rebuilt.items():
         existing = merged.get(sid) or {}
-        merged[sid] = {
-            'crawl_ms': max(int(existing.get('crawl_ms') or 0), int(bucket.get('crawl_ms') or 0)),
-            'investigation_crawl_ms': max(
-                int(existing.get('investigation_crawl_ms') or 0),
-                int(bucket.get('investigation_crawl_ms') or 0),
-            ),
-            'analyze_ms': max(int(existing.get('analyze_ms') or 0), int(bucket.get('analyze_ms') or 0)),
-            'raw_new': max(int(existing.get('raw_new') or 0), int(bucket.get('raw_new') or 0)),
-            'intel_written': max(int(existing.get('intel_written') or 0), int(bucket.get('intel_written') or 0)),
-        }
+        merged[sid] = _merge_source_timing_with_intel(existing, bucket)
     return merged
 
 
@@ -1782,17 +1871,43 @@ def _active_source_work(run_id, source_id):
     ).fetchone()
     if q:
         label = ''
+        progress = None
         try:
             payload = json.loads(q['payload_json'] or '{}')
-            label = (payload.get('keyword') or payload.get('partner_id') or '')[:40]
+            if (q['phase'] or '') == 'investigation':
+                bi = payload.get('batch_index')
+                bt = payload.get('batch_total')
+                pd = payload.get('progress_done')
+                pt = payload.get('progress_total') or len(payload.get('items') or [])
+                inv_total = payload.get('investigation_total')
+                parts = []
+                if bi and bt:
+                    parts.append('批次 %d/%d' % (bi, bt))
+                if pd is not None and pt:
+                    parts.append('%d/%d' % (int(pd), int(pt)))
+                if inv_total:
+                    parts.append('总 %d' % int(inv_total))
+                label = ' · '.join(parts) if parts else '勘察'
+                progress = {
+                    'done': int(pd or 0),
+                    'total': int(pt or 0),
+                    'batch_index': bi,
+                    'batch_total': bt,
+                    'investigation_total': inv_total,
+                }
+            else:
+                label = (payload.get('keyword') or payload.get('partner_id') or '')[:40]
         except Exception:
             label = ''
-        return {
+        out = {
             'kind': 'queue',
             'phase': q['phase'] or 'crawl',
             'label': str(label) if label else '',
             'elapsed_ms': _elapsed_ms_since(q['claimed_at']),
         }
+        if progress:
+            out['progress'] = progress
+        return out
     return None
 
 
@@ -1867,11 +1982,11 @@ def resolve_subtask_detail_status(
         if phase == 'list':
             return 'list_crawl', '爬取列表'
         if phase == 'triage':
-            return 'analyze', '分析'
+            return 'triage', '初筛'
         if phase == 'investigation':
             return 'investigation', '勘察详情'
         if phase == 'analyze':
-            return 'analyze', '分析'
+            return 'intel_analyze', '情报分析'
         if phase in ('legacy_crawl', 'list_crawl', 'keyword_pipeline', 'crawl'):
             return 'list_crawl', '爬取列表'
         return 'list_crawl', '爬取列表'
@@ -1886,12 +2001,12 @@ def _queue_item_phase_timing(item, elapsed_ms=0):
     if isinstance(raw, dict):
         return {
             'list_crawl_ms': int(raw.get('list_crawl_ms') or 0),
-            'analyze_ms': int(raw.get('analyze_ms') or 0),
+            'triage_ms': _pt_triage_ms(raw),
             'investigation_ms': int(raw.get('investigation_ms') or 0),
         }
     phase = (item or {}).get('phase') or ''
     status = (item or {}).get('status') or ''
-    timing = {'list_crawl_ms': 0, 'analyze_ms': 0, 'investigation_ms': 0}
+    timing = {'list_crawl_ms': 0, 'triage_ms': 0, 'investigation_ms': 0}
     if status == 'claimed' and elapsed_ms > 0:
         if phase in ('legacy_crawl', 'list_crawl', 'keyword_pipeline'):
             timing['list_crawl_ms'] = int(elapsed_ms)
@@ -1904,11 +2019,7 @@ def _keyword_phase_timing(kw):
     """keyword 子任务三阶段用时（含运行中当前阶段增量）。"""
     stats = (kw or {}).get('stats') or {}
     base = stats.get('phase_timing_ms') if isinstance(stats.get('phase_timing_ms'), dict) else {}
-    timing = {
-        'list_crawl_ms': int((base or {}).get('list_crawl_ms') or 0),
-        'analyze_ms': int((base or {}).get('analyze_ms') or 0),
-        'investigation_ms': int((base or {}).get('investigation_ms') or 0),
-    }
+    timing = _normalize_phase_timing(base)
     if (kw or {}).get('status') != 'running':
         return timing
     phase = (kw or {}).get('phase') or 'list'
@@ -1916,7 +2027,7 @@ def _keyword_phase_timing(kw):
     if phase == 'list':
         timing['list_crawl_ms'] += extra
     elif phase == 'triage':
-        timing['analyze_ms'] += extra
+        timing['triage_ms'] += extra
     elif phase == 'investigation':
         timing['investigation_ms'] += extra
     return timing
@@ -1939,6 +2050,20 @@ def _queue_item_label(source_id, payload, queue_phase=''):
         return label[:80]
     if queue_phase == 'investigation':
         n = len(payload.get('items') or [])
+        bi = payload.get('batch_index')
+        bt = payload.get('batch_total')
+        inv_total = payload.get('investigation_total')
+        pd = payload.get('progress_done')
+        pt = payload.get('progress_total') or n
+        if bi and bt:
+            label = '勘察批次 %d/%d' % (bi, bt)
+            if n:
+                label += ' · %d条' % n
+            if pd is not None and pt:
+                label += ' · %d/%d' % (int(pd), int(pt))
+            if inv_total:
+                label += ' · 共%d条' % int(inv_total)
+            return label[:80]
         return '勘察批次(%d)' % n if n else '勘察批次'
     return '子任务#' + str(payload.get('partner_id') or '?')
 
@@ -2010,6 +2135,16 @@ def build_source_subtask_items(run_id, source_id):
         if q.get('status') == 'claimed' and q.get('claimed_at'):
             elapsed_ms = _elapsed_ms_since(q['claimed_at'])
         phase_timing = _queue_item_phase_timing(q, elapsed_ms=elapsed_ms)
+        qpayload = q.get('payload') or {}
+        qstats = {}
+        if (q.get('phase') or '') == 'investigation':
+            qstats = {
+                'batch_index': qpayload.get('batch_index'),
+                'batch_total': qpayload.get('batch_total'),
+                'investigation_total': qpayload.get('investigation_total'),
+                'progress_done': qpayload.get('progress_done', 0),
+                'progress_total': qpayload.get('progress_total') or len(qpayload.get('items') or []),
+            }
         out.append({
             'id': 'q:%s' % q['id'],
             'kind': 'queue',
@@ -2024,7 +2159,7 @@ def build_source_subtask_items(run_id, source_id):
             'elapsed_ms': elapsed_ms,
             'phase_timing_ms': phase_timing,
             'timeout_sec': 0,
-            'stats': {},
+            'stats': qstats,
             'error_message': q.get('error_message') or q.get('skip_reason') or '',
         })
 
@@ -2085,9 +2220,12 @@ def build_run_subtasks_by_source(run_id, task_sources=None, run_timing=None):
             'queue': qc,
             'keywords': kc,
             'timing': {
-                'crawl_ms': int(timing.get('crawl_ms') or 0),
+                'list_crawl_ms': int(timing.get('list_crawl_ms') or timing.get('crawl_ms') or 0),
+                'crawl_ms': int(timing.get('list_crawl_ms') or timing.get('crawl_ms') or 0),
+                'triage_ms': int(timing.get('triage_ms') or 0),
                 'investigation_crawl_ms': int(timing.get('investigation_crawl_ms') or 0),
-                'analyze_ms': int(timing.get('analyze_ms') or 0),
+                'intel_analyze_ms': int(timing.get('intel_analyze_ms') or timing.get('analyze_ms') or 0),
+                'analyze_ms': int(timing.get('intel_analyze_ms') or timing.get('analyze_ms') or 0),
                 'raw_new': int(timing.get('raw_new') or 0),
                 'intel_written': int(timing.get('intel_written') or 0),
             },
@@ -2095,6 +2233,30 @@ def build_run_subtasks_by_source(run_id, task_sources=None, run_timing=None):
             'phase_summary': _keyword_phase_summary(run_id, sid),
             'subtask_items': build_source_subtask_items(run_id, sid),
         })
+    return out
+
+
+def investigation_queue_counts(task_id, source_id=None):
+    """investigation_queue 各状态计数（可选按源）。"""
+    conn = get_connection()
+    sql = """
+        SELECT status, COUNT(*) AS cnt FROM investigation_queue
+        WHERE task_id=?
+    """
+    params = [task_id]
+    if source_id:
+        sql += ' AND source=?'
+        params.append(source_id)
+    sql += ' GROUP BY status'
+    rows = conn.execute(sql, params).fetchall()
+    out = {'pending': 0, 'done': 0, 'failed': 0, 'skipped': 0, 'total': 0}
+    for row in rows:
+        st = (row['status'] or '').strip().lower()
+        cnt = int(row['cnt'] or 0)
+        if st in out:
+            out[st] = cnt
+        out['total'] += cnt
+    out['finished'] = out['done'] + out['failed'] + out['skipped']
     return out
 
 
@@ -2110,8 +2272,20 @@ def sync_task_subtask_progress(task_id, run_id):
     except Exception:
         progress = {}
     progress['subtasks'] = counts
+    progress['investigation'] = investigation_queue_counts(task_id)
     progress['sources'] = build_run_subtasks_by_source(run_id, sources)
     progress['run_id'] = run_id
+    try:
+        pending_detail = count_detail_pending_analyze(task_id)
+        analyze_drain = dict(progress.get('analyze_drain') or {})
+        analyze_drain['pending_detail'] = pending_detail
+        progress['analyze_drain'] = analyze_drain
+    except Exception:
+        pass
+    for src in progress['sources']:
+        sid = src.get('source_id')
+        if sid:
+            src['investigation'] = investigation_queue_counts(task_id, source_id=sid)
     conn.execute(
         'UPDATE monitor_tasks SET progress_json=?, updated_at=? WHERE id=?',
         (json.dumps(progress, ensure_ascii=False), _utc_now(), task_id),
@@ -2179,10 +2353,13 @@ def update_monitor_task(task_id, data):
     business_spec = task.get('business_spec') or {}
     if 'business_spec' in data and isinstance(data.get('business_spec'), dict):
         business_spec = data['business_spec']
+    crawl_only = task.get('crawl_only', False)
+    if 'crawl_only' in data:
+        crawl_only = bool(data.get('crawl_only'))
     conn.execute(
         """
         UPDATE monitor_tasks SET name=?, sources_json=?, max_pages=?, fetch_detail=?,
-                                 crawl_mode=?, business_spec_json=?,
+                                 crawl_mode=?, business_spec_json=?, crawl_only=?,
                                  status='queued', error_message='', updated_at=?,
                                  started_at=NULL, finished_at=NULL, progress_json='{}'
         WHERE id=?
@@ -2194,6 +2371,7 @@ def update_monitor_task(task_id, data):
             1 if data.get('fetch_detail', task['fetch_detail']) else 0,
             crawl_mode,
             json.dumps(business_spec, ensure_ascii=False),
+            1 if crawl_only else 0,
             now,
             task_id,
         ),
@@ -2345,9 +2523,24 @@ def _intel_dedup_exists(task_id, dedup_key):
 
 def insert_raw_records(
     task_id, partner_id, source, keyword, records, run_metrics=None, crawl_phase='legacy',
+    ignore_before=None,
 ):
+    skipped_ignore_before = 0
+    if ignore_before and records:
+        from intel.ignore_before import filter_raw_records_by_ignore_before
+
+        records, skipped_ignore_before = filter_raw_records_by_ignore_before(
+            records, source, ignore_before, run_metrics=run_metrics,
+        )
     if not records:
-        return {'ids': [], 'inserted': 0, 'updated': 0, 'unchanged': 0, 'skipped': 0}
+        return {
+            'ids': [],
+            'inserted': 0,
+            'updated': 0,
+            'unchanged': 0,
+            'skipped': 0,
+            'skipped_ignore_before': skipped_ignore_before,
+        }
     conn = get_connection()
     now = _utc_now()
     index = _raw_index_by_dedup(task_id)
@@ -2404,6 +2597,7 @@ def insert_raw_records(
         'updated': updated,
         'unchanged': unchanged,
         'skipped': unchanged,
+        'skipped_ignore_before': skipped_ignore_before,
     }
 
 
@@ -2444,6 +2638,24 @@ def _raw_published_at(source, payload, anchor_at=''):
     return pub or ''
 
 
+def _raw_payload_url(source, payload):
+    """从 raw payload 提取原文链接（黑猫 link、小红书 link/url）。"""
+    if not isinstance(payload, dict):
+        return ''
+    link = (payload.get('link') or payload.get('url') or '').strip()
+    if link:
+        if link.startswith('//'):
+            link = 'https:' + link
+        elif link.startswith('/'):
+            link = 'https://tousu.sina.com.cn' + link if source == 'heimao' else link
+        return link
+    try:
+        from intel.registry import registry
+        return (registry.get_normalizer(source).normalize(payload).get('url') or '').strip()
+    except Exception:
+        return ''
+
+
 def _row_raw_list(row):
     payload = json.loads(row['payload_json'] or '{}')
     intel_id = row['intel_id'] if row['intel_id'] else None
@@ -2477,9 +2689,11 @@ def _row_raw_detail(row):
         'keyword': row['keyword'],
         'title_summary': _raw_title_summary(payload),
         'published_at': _raw_published_at(row['source'], payload, anchor_at),
+        'url': _raw_payload_url(row['source'], payload),
         'payload': payload,
         'dedup_key': row['dedup_key'] if 'dedup_key' in row.keys() else '',
         'content_hash': row['content_hash'] if 'content_hash' in row.keys() else '',
+        'crawl_phase': row['crawl_phase'] if 'crawl_phase' in row.keys() else 'legacy',
         'created_at': row['created_at'],
         'updated_at': anchor_at,
         'intel_id': intel_id,
@@ -2808,6 +3022,7 @@ def list_analysis_jobs(task_id=None, limit=10):
 
 
 def insert_analysis_log(data):
+    log_id = insert_llm_usage_log(dict(data, phase=data.get('phase') or 'analysis'))
     conn = get_connection()
     now = _utc_now()
     cur = conn.execute(
@@ -2837,11 +3052,257 @@ def insert_analysis_log(data):
         ),
     )
     conn.commit()
+    return cur.lastrowid or log_id
+
+
+def insert_llm_usage_log(data):
+    conn = get_connection()
+    now = data.get('created_at') or _utc_now()
+    phase = data.get('phase') or 'analysis'
+    cur = conn.execute(
+        """
+        INSERT INTO llm_usage_logs(
+            task_id, run_id, phase, job_id, batch_index, partner_name, item_count,
+            status, model, latency_ms, prompt_tokens, completion_tokens, total_tokens,
+            items_written, attempt, error_message, created_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            data.get('task_id'),
+            data.get('run_id'),
+            phase,
+            data.get('job_id'),
+            int(data.get('batch_index') or 0),
+            data.get('partner_name') or '',
+            int(data.get('item_count') or 0),
+            data.get('status') or 'ok',
+            data.get('model') or '',
+            int(data.get('latency_ms') or 0),
+            int(data.get('prompt_tokens') or 0),
+            int(data.get('completion_tokens') or 0),
+            int(data.get('total_tokens') or 0),
+            int(data.get('items_written') or 0),
+            int(data.get('attempt') or 1),
+            data.get('error_message') or '',
+            now,
+        ),
+    )
+    conn.commit()
     return cur.lastrowid
 
 
-def list_analysis_logs(task_id=None, job_id=None, limit=100):
+def _row_llm_usage(r):
+    return {
+        'id': r['id'],
+        'task_id': r['task_id'],
+        'run_id': r['run_id'],
+        'phase': r['phase'],
+        'job_id': r['job_id'],
+        'batch_index': r['batch_index'],
+        'partner_name': r['partner_name'],
+        'item_count': r['item_count'],
+        'status': r['status'],
+        'model': r['model'],
+        'latency_ms': r['latency_ms'],
+        'prompt_tokens': r['prompt_tokens'],
+        'completion_tokens': r['completion_tokens'],
+        'total_tokens': r['total_tokens'],
+        'items_written': r['items_written'],
+        'attempt': r['attempt'],
+        'error_message': r['error_message'],
+        'created_at': r['created_at'],
+    }
+
+
+def _empty_usage_totals():
+    return {
+        'prompt_tokens': 0,
+        'completion_tokens': 0,
+        'total_tokens': 0,
+        'api_calls': 0,
+        'mock_calls': 0,
+        'failed_calls': 0,
+        'latency_ms': 0,
+    }
+
+
+def _accumulate_usage_totals(bucket, row):
+    bucket['prompt_tokens'] += int(row.get('prompt_tokens') or 0)
+    bucket['completion_tokens'] += int(row.get('completion_tokens') or 0)
+    bucket['total_tokens'] += int(row.get('total_tokens') or 0)
+    bucket['latency_ms'] += int(row.get('latency_ms') or 0)
+    if 'api_calls' in row or 'mock_calls' in row or 'failed_calls' in row:
+        bucket['api_calls'] += int(row.get('api_calls') or 0)
+        bucket['mock_calls'] += int(row.get('mock_calls') or 0)
+        bucket['failed_calls'] += int(row.get('failed_calls') or 0)
+        return
+    status = row.get('status') or 'ok'
+    if status == 'failed':
+        bucket['failed_calls'] += 1
+    elif status == 'mock':
+        bucket['mock_calls'] += 1
+    else:
+        bucket['api_calls'] += 1
+
+
+def aggregate_llm_usage(days=30, task_id=None):
     conn = get_connection()
+    days = max(1, min(int(days or 30), 365))
+    now = datetime.now(app_tz())
+    since_dt = (now - timedelta(days=days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    since_iso = since_dt.strftime('%Y-%m-%dT%H:%M:%S')
+    today_prefix = now.strftime('%Y-%m-%d')
+
+    where_parts = ['created_at >= ?']
+    join_parts = ['l.created_at >= ?']
+    params = [since_iso]
+    if task_id:
+        where_parts.append('task_id = ?')
+        join_parts.append('l.task_id = ?')
+        params.append(int(task_id))
+    where_sql = ' AND '.join(where_parts)
+    join_where_sql = ' AND '.join(join_parts)
+
+    rows = conn.execute(
+        f"""
+        SELECT substr(created_at, 1, 10) AS day, phase,
+               SUM(prompt_tokens) AS prompt_tokens,
+               SUM(completion_tokens) AS completion_tokens,
+               SUM(total_tokens) AS total_tokens,
+               SUM(latency_ms) AS latency_ms,
+               SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed_calls,
+               SUM(CASE WHEN status='mock' THEN 1 ELSE 0 END) AS mock_calls,
+               SUM(CASE WHEN status NOT IN ('failed', 'mock') THEN 1 ELSE 0 END) AS api_calls
+        FROM llm_usage_logs
+        WHERE {where_sql}
+        GROUP BY day, phase
+        ORDER BY day DESC
+        """,
+        params,
+    ).fetchall()
+
+    task_rows = conn.execute(
+        f"""
+        SELECT l.task_id, COALESCE(t.name, '') AS task_name, l.phase,
+               SUM(l.prompt_tokens) AS prompt_tokens,
+               SUM(l.completion_tokens) AS completion_tokens,
+               SUM(l.total_tokens) AS total_tokens,
+               SUM(l.latency_ms) AS latency_ms,
+               SUM(CASE WHEN l.status='failed' THEN 1 ELSE 0 END) AS failed_calls,
+               SUM(CASE WHEN l.status='mock' THEN 1 ELSE 0 END) AS mock_calls,
+               SUM(CASE WHEN l.status NOT IN ('failed', 'mock') THEN 1 ELSE 0 END) AS api_calls
+        FROM llm_usage_logs l
+        LEFT JOIN monitor_tasks t ON t.id = l.task_id
+        WHERE {join_where_sql}
+        GROUP BY l.task_id, l.phase
+        ORDER BY SUM(l.total_tokens) DESC, l.task_id ASC
+        """,
+        params,
+    ).fetchall()
+
+    period = _empty_usage_totals()
+    by_phase = {
+        'list_triage': _empty_usage_totals(),
+        'analysis': _empty_usage_totals(),
+    }
+    today = _empty_usage_totals()
+    daily_map = {}
+
+    for r in rows:
+        day = r['day'] or ''
+        phase = r['phase'] or 'analysis'
+        entry = {
+            'prompt_tokens': int(r['prompt_tokens'] or 0),
+            'completion_tokens': int(r['completion_tokens'] or 0),
+            'total_tokens': int(r['total_tokens'] or 0),
+            'latency_ms': int(r['latency_ms'] or 0),
+            'api_calls': int(r['api_calls'] or 0),
+            'mock_calls': int(r['mock_calls'] or 0),
+            'failed_calls': int(r['failed_calls'] or 0),
+        }
+        if day not in daily_map:
+            daily_map[day] = {
+                'date': day,
+                'total': _empty_usage_totals(),
+                'list_triage': _empty_usage_totals(),
+                'analysis': _empty_usage_totals(),
+            }
+        bucket = daily_map[day]
+        phase_key = phase if phase in by_phase else 'analysis'
+        for key in entry:
+            bucket['total'][key] += entry[key]
+            bucket[phase_key][key] += entry[key]
+        _accumulate_usage_totals(period, entry)
+        _accumulate_usage_totals(by_phase.get(phase_key, by_phase['analysis']), entry)
+        if day == today_prefix:
+            _accumulate_usage_totals(today, entry)
+
+    daily = [daily_map[k] for k in sorted(daily_map.keys(), reverse=True)]
+
+    task_map = {}
+    for r in task_rows:
+        tid = r['task_id']
+        if tid not in task_map:
+            task_map[tid] = {
+                'task_id': tid,
+                'task_name': r['task_name'] or ('任务 #%s' % tid if tid else '未关联任务'),
+                'total': _empty_usage_totals(),
+                'list_triage': _empty_usage_totals(),
+                'analysis': _empty_usage_totals(),
+            }
+        phase = r['phase'] or 'analysis'
+        phase_key = phase if phase in ('list_triage', 'analysis') else 'analysis'
+        entry = {
+            'prompt_tokens': int(r['prompt_tokens'] or 0),
+            'completion_tokens': int(r['completion_tokens'] or 0),
+            'total_tokens': int(r['total_tokens'] or 0),
+            'latency_ms': int(r['latency_ms'] or 0),
+            'api_calls': int(r['api_calls'] or 0),
+            'mock_calls': int(r['mock_calls'] or 0),
+            'failed_calls': int(r['failed_calls'] or 0),
+        }
+        for key in entry:
+            task_map[tid]['total'][key] += entry[key]
+            task_map[tid][phase_key][key] += entry[key]
+
+    by_task = sorted(task_map.values(), key=lambda x: x['total']['total_tokens'], reverse=True)
+
+    return {
+        'days': days,
+        'since': since_iso,
+        'today': today,
+        'period': {
+            'total': period,
+            'by_phase': by_phase,
+        },
+        'daily': daily,
+        'by_task': by_task,
+    }
+
+
+def list_analysis_logs(task_id=None, job_id=None, phase=None, limit=100):
+    conn = get_connection()
+    llm_cols = {r[1] for r in conn.execute('PRAGMA table_info(llm_usage_logs)').fetchall()}
+    if llm_cols:
+        where = ['1=1']
+        params = []
+        if task_id:
+            where.append('task_id = ?')
+            params.append(task_id)
+        if job_id:
+            where.append('job_id = ?')
+            params.append(job_id)
+        if phase:
+            where.append('phase = ?')
+            params.append(phase)
+        sql = (
+            'SELECT * FROM llm_usage_logs WHERE '
+            + ' AND '.join(where)
+            + ' ORDER BY id DESC LIMIT ?'
+        )
+        rows = conn.execute(sql, params + [limit]).fetchall()
+        return [_row_llm_usage(r) for r in rows]
+
     where = ['1=1']
     params = []
     if task_id:
@@ -2862,6 +3323,8 @@ def list_analysis_logs(task_id=None, job_id=None, limit=100):
             'id': r['id'],
             'job_id': r['job_id'],
             'task_id': r['task_id'],
+            'run_id': None,
+            'phase': 'analysis',
             'batch_index': r['batch_index'],
             'partner_name': r['partner_name'],
             'item_count': r['item_count'],
@@ -3023,6 +3486,25 @@ def get_dashboard_summary():
         'tasks_failed_recent': tasks_failed_recent,
         'recent_runs': [_row_task_run(r) for r in run_rows],
     }
+
+
+def count_detail_pending_analyze(task_id):
+    """detail-ready 且尚未 incremental 分析的 raw 条数（供 progress/stats）。"""
+    task = get_monitor_task(task_id)
+    if not task:
+        return 0
+    from intel.runner import _count_pending_analyze_raw, _get_enabled_partners
+    from source_profiles import task_uses_shared_pool
+
+    partners = _get_enabled_partners(task)
+    return _count_pending_analyze_raw(
+        task_id,
+        partners,
+        analyze_mode='incremental',
+        shared_pool=task_uses_shared_pool(task),
+        task=task,
+        detail_only=True,
+    )
 
 
 def count_raw_records(task_id):

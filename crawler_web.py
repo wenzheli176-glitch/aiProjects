@@ -43,6 +43,7 @@ from xhs_detail import (
     parse_xhs_note_id,
     scroll_search_for_note,
 )
+from heimao_scroll import heimao_scroll_load_batch
 from heimao_session import (
     count_heimao_complaint_links,
     ensure_heimao_detail_url,
@@ -57,7 +58,6 @@ from crawl_early_stop import (
     xhs_should_stop_end_marker,
     xhs_update_saturation,
 )
-
 app = Flask(__name__, template_folder='templates', static_folder='static')
 
 class S:
@@ -584,7 +584,7 @@ def crawl_heimao(keyword, max_pages, fetch_detail=True, managed_session=False, t
             return results
 
         es = early_stop_cfg('heimao', h)
-        consecutive_empty = 0
+        heimao_stop_state = {'saturation_rounds': 0, 'prev_item_count': 0}
 
         for p in range(1, max_pages + 1):
             if not S.running:
@@ -595,33 +595,31 @@ def crawl_heimao(keyword, max_pages, fetch_detail=True, managed_session=False, t
                 break
             log('黑猫第 %d/%d 页' % (p, max_pages))
             try:
-                if p > 1:
-                    url = h['search_url_template'].format(keyword=keyword, page=p)
-                    main_page.goto(url, timeout=timeout, wait_until='domcontentloaded')
-                    time.sleep(random.uniform(
-                        float(h.get('page_wait_min', 3)),
-                        float(h.get('page_wait_max', 5)),
-                    ))
+                heimao_scroll_load_batch(main_page, h, log_fn=log)
+                time.sleep(random.uniform(
+                    float(h.get('page_wait_min', 3)),
+                    float(h.get('page_wait_max', 5)),
+                ))
 
                 page_too_short = False
                 parse_attempts = 1
                 if es.get('enabled') and p == 1 and es.get('protect_first_page'):
                     parse_attempts = 1 + int(es.get('empty_page_retry', 0))
 
-                new_count = 0
+                before_len = len(results)
                 for attempt in range(parse_attempts):
                     if attempt > 0:
                         log('第 1 页无结果，重试搜索 (%d/%d)…' % (attempt, parse_attempts - 1))
                         html = _redo_heimao_search()
                         if not html:
                             html = main_page.content()
+                        heimao_scroll_load_batch(main_page, h, log_fn=log)
                     else:
                         html = main_page.content()
 
                     if len(html) < int(h.get('min_html_len', 1000)):
                         log('页面过短', 'WARN')
                         page_too_short = True
-                        new_count = 0
                         break
 
                     if fetch_detail:
@@ -641,7 +639,6 @@ def crawl_heimao(keyword, max_pages, fetch_detail=True, managed_session=False, t
                                     break
 
                     a_tags = re.findall(h['link_regex'], html, re.DOTALL)
-                    new_count = 0
                     min_text = int(h.get('min_link_text_len', 15))
                     preview_len = int(h.get('list_title_preview_len', 40))
 
@@ -712,25 +709,38 @@ def crawl_heimao(keyword, max_pages, fetch_detail=True, managed_session=False, t
                         sr = structure_heimao_record(r, len(results) + 1)
                         r['structured'] = sr
                         results.append(r)
-                        new_count += 1
                         if not fetch_detail:
                             log('黑猫: %s %s' % (
                                 r['time'][:10] if r.get('time') else '',
                                 (r.get('title') or '')[:preview_len],
                             ))
 
-                    if new_count > 0 or attempt >= parse_attempts - 1:
+                    if len(results) > before_len or attempt >= parse_attempts - 1:
                         break
 
                 if not S.running:
                     break
 
-                log('本页: %d (累计: %d)' % (new_count, len(results)))
+                new_count = len(results) - before_len
+                total_links = count_heimao_complaint_links(html, h['link_regex'], min_text)
+                log('本轮: +%d (DOM 链接 %d, 累计 %d)' % (new_count, total_links, len(results)))
                 if page_too_short:
                     continue
 
-                stop, reason, consecutive_empty = heimao_should_stop_after_page(
-                    es, p, max_pages, new_count, consecutive_empty, page_too_short=False,
+                stop, reason, _ = heimao_should_stop_after_page(
+                    es, p, max_pages, new_count, 0, page_too_short=False,
+                )
+                if stop and reason:
+                    log(format_early_stop_log('heimao', reason, p, max_pages))
+                    break
+
+                stop, reason = xhs_should_stop_end_marker(es, p, max_pages, main_page, total_links)
+                if stop and reason:
+                    log(format_early_stop_log('heimao', reason, p, max_pages))
+                    break
+
+                stop, reason = xhs_update_saturation(
+                    es, heimao_stop_state, p, max_pages, new_count, total_links,
                 )
                 if stop and reason:
                     log(format_early_stop_log('heimao', reason, p, max_pages))
@@ -762,7 +772,7 @@ def crawl_heimao(keyword, max_pages, fetch_detail=True, managed_session=False, t
     return results
 
 
-def fetch_heimao_details_by_urls(urls, managed_session=True, log_fn=None):
+def fetch_heimao_details_by_urls(urls, managed_session=True, log_fn=None, on_progress=None):
     """勘察阶段：按 URL 列表抓取黑猫详情（单标签导航，不新建弹窗）。"""
     h = _c()['heimao']
     results = []
@@ -792,11 +802,12 @@ def fetch_heimao_details_by_urls(urls, managed_session=True, log_fn=None):
         if not ensure_login_for_detail(ctx, page, 'heimao', True, S):
             _log('黑猫登录未完成', 'ERROR')
             return results
-        for url in urls:
+        valid_urls = [u for u in (urls or []) if u]
+        total = len(valid_urls)
+        processed = 0
+        for url in valid_urls:
             if not S.running:
                 break
-            if not url:
-                continue
             page = _ensure_page(ctx, page)
             sid = S.heimao_sid or extract_heimao_sid(page, ctx)
             detail_link = ensure_heimao_detail_url(url, sid)
@@ -826,6 +837,12 @@ def fetch_heimao_details_by_urls(urls, managed_session=True, log_fn=None):
                 results.append(r)
             except Exception as e:
                 _log('详情错误 %s: %s' % (url[-24:], str(e)[:60]), 'ERROR')
+            processed += 1
+            if on_progress:
+                try:
+                    on_progress(processed, total, url)
+                except Exception:
+                    pass
         close_extra_pages(ctx, keep_page=page)
     except Exception as e:
         _log('fetch_heimao_details 异常: %s' % str(e)[:80], 'ERROR')

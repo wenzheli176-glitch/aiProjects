@@ -10,7 +10,7 @@ os.environ.setdefault('MINIMAX_API_KEY', '')
 
 def test_parallel_batches_config_default():
     from config import DEFAULT_CONFIG
-    assert int((DEFAULT_CONFIG.get('analysis') or {}).get('parallel_batches') or 0) == 5
+    assert int((DEFAULT_CONFIG.get('analysis') or {}).get('parallel_batches') or 0) == 3
     print('OK test_parallel_batches_config_default')
 
 
@@ -60,7 +60,19 @@ def test_parallel_batches_mock():
     print('OK test_parallel_batches_mock')
 
 
+def test_format_llm_timeout_error():
+    import socket
+    from intel.analyze import _format_llm_call_error
+
+    msg = _format_llm_call_error(TimeoutError('The read operation timed out'), 300)
+    assert '超时' in msg and '300' in msg
+    msg2 = _format_llm_call_error(socket.timeout('timed out'), 300)
+    assert '超时' in msg2
+    print('OK test_format_llm_timeout_error')
+
+
 if __name__ == '__main__':
     test_parallel_batches_config_default()
     test_parallel_batches_mock()
+    test_format_llm_timeout_error()
     print('All analyze parallel tests passed.')

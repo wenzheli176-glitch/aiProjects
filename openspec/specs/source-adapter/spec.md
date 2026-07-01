@@ -27,14 +27,14 @@ TBD - created by archiving change partner-risk-intel. Update Purpose after archi
 
 ### Requirement: CrawlAdapter 契约
 
-每个数据源 MUST 实现 CrawlAdapter：`source_id`、`crawl(ctx, task, partner, options) -> list[RawRecord]`，并可声明 `supports_fetch_detail`。`options.max_pages` MUST 表示该源的结果采集页数，语义与 heimao URL 分页页数一致；xhs 通过滚动实现同等页数，不得使用独立的「滚动次数」含义。
+每个数据源 MUST 实现 CrawlAdapter：`source_id`、`crawl(ctx, task, partner, options) -> list[RawRecord]`，并可声明 `supports_fetch_detail`。`options.max_pages` MUST 表示该源的结果采集页数（滚动采集轮次上限）；heimao 与 xhs MUST 使用相同语义，不得对 heimao 单独使用 URL 分页页数含义。
 
 #### Scenario: heimao 适配现有爬虫
 
 - **当** heimao CrawlAdapter 执行爬取
 - **则** 必须复用 `crawler_web.py` / `login_gate.py` / `heimao_session.py` 的登录与搜索逻辑
 - **且** 结果必须写入 SQLite `raw_records`，含 `task_id`、`partner_id`、`source=heimao`
-- **且** 每条 raw 的 `page` 字段必须为 1..`max_pages` 中的 URL 页码
+- **且** 每条 raw 的 `page` 字段必须为 1..`max_pages` 中的滚动采集轮次
 
 #### Scenario: xhs 适配弹窗详情
 
@@ -116,37 +116,45 @@ TBD - created by archiving change partner-risk-intel. Update Purpose after archi
 
 ### Requirement: max_pages 跨源统一语义
 
-系统 SHALL 将 MonitorTask 与 CrawlAdapter 的 `max_pages` 参数定义为 **结果采集页数上限 M**：对 heimao 为 URL 分页最多 1..M，对 xhs 为最多 M 次滚动采集轮次；两源 MUST 使用一致的「第 i/M 页」日志与 RawRecord `page` 字段（`page` 为实际采集页码，1≤page≤i≤M）。当 `early_stop.enabled=true` 且检测到分页见底时，实际采集页数 i  MAY 小于 M。
+系统 SHALL 将 MonitorTask 与 CrawlAdapter 的 `max_pages` 参数定义为 **结果采集页数上限 M**：对 heimao 与 xhs 均为最多 M 次滚动采集轮次；两源 MUST 使用一致的「第 i/M 页」日志与 RawRecord `page` 字段（`page` 为实际采集轮次，1≤page≤i≤M）。当 `early_stop.enabled=true` 且检测到列表见底时，实际轮次 i MAY 小于 M。
 
-#### Scenario: 黑猫分页语义不变
+#### Scenario: 黑猫滚动采集语义
 
 - **当** heimao CrawlAdapter 收到 `max_pages=M`
-- **则** 必须访问搜索 URL 第 1 页起顺序分页，最多至第 M 页
-- **且** 日志必须使用「黑猫第 i/M 页」格式
+- **则** 必须在搜索框提交关键词后，执行最多 M 轮滚动采集
+- **且** 每轮 MUST 在解析 DOM 前按 `config.heimao.scroll_*` 滚动加载
+- **且** 日志必须使用「黑猫第 i/M 页」格式，并 SHOULD 输出「黑猫下拉加载: N 次滚动」
 
-#### Scenario: 黑猫分页见底早停
+#### Scenario: 黑猫第 1 轮零结果保护
 
-- **当** `config.heimao.early_stop.enabled=true`
-- **且** 已连续 `empty_pages_threshold` 页无新链接（`seen` 去重后 `new_count=0`）
-- **且** 当前页码 i ≥ `min_pages`
-- **则** 必须停止后续分页
-- **且** 日志必须包含 `early_stop: heimao · reason=empty_page · stopped_at=i/M`
-
-#### Scenario: 黑猫第 1 页零结果保护
-
-- **当** `protect_first_page=true` 且第 1 页 `new_count=0`
+- **当** `protect_first_page=true` 且第 1 轮 `new_count=0`
 - **且** `empty_page_retry=0`（默认）
 - **则** 必须立即停止当前关键词（`reason=empty_page`）
 - **且** MUST NOT 因缺少 sid 进入 `WAITING_LOGIN`
-- **且** MUST NOT 重搜同一关键词
-- **且** 第 1 页零结果 alone 不得计入连续空页阈值
+- **且** MUST NOT 重搜同一关键词（除非刚完成登录恢复的 `redo_search`）
+
+#### Scenario: 黑猫 end 标志早停
+
+- **当** `config.heimao.early_stop.enabled=true`
+- **且** 滚动后页面出现 `end_texts` 中任一条（默认 MUST 含 `暂无更多`）或匹配 `end_selectors`
+- **且** 当前轮次 i ≥ `min_pages`
+- **则** 必须停止后续滚动轮次
+- **且** 日志必须包含 `early_stop: heimao · reason=end_marker · stopped_at=i/M`
+
+#### Scenario: 黑猫滚动饱和早停
+
+- **当** `config.heimao.early_stop.enabled=true`
+- **且** 连续 `saturation_rounds` 轮满足：本轮 `new_count=0` 且 DOM 投诉链接总数较上一轮未增加
+- **且** 当前轮次 i ≥ `min_pages`
+- **则** 必须停止后续滚动轮次
+- **且** 日志必须包含 `early_stop: heimao · reason=scroll_saturated · stopped_at=i/M`
 
 #### Scenario: 黑猫显式配置 empty_page_retry 大于 0
 
 - **当** 管理员显式设置 `heimao.early_stop.empty_page_retry>0`
-- **且** `protect_first_page=true` 且第 1 页 `new_count=0`
+- **且** `protect_first_page=true` 且第 1 轮 `new_count=0`
 - **则** MAY 重试搜索（次数 ≤ `empty_page_retry`）
-- **且** 重试后仍无新链接时必须停止，不得无意义翻至第 2 页
+- **且** 重试后仍无新链接时必须停止
 
 #### Scenario: 小红书页数与黑猫对齐
 
@@ -328,7 +336,30 @@ TBD - created by archiving change partner-risk-intel. Update Purpose after archi
 - **当** 未在 `config.json` 中覆盖 early_stop
 - **则** 必须使用 `config.py` DEFAULT 中各源 early_stop 默认值（`enabled=true`）
 - **且** heimao 默认 `empty_page_retry` 必须为 `0`
+- **且** heimao 默认 `end_texts` 必须包含 `暂无更多`
+- **且** heimao 默认 `saturation_rounds` 必须为 `2`
 - **且** xhs 默认 `end_texts` 必须包含 `- THE END -`
+
+### Requirement: heimao 滚动加载配置
+
+系统 SHALL 在 `config.heimao` 提供滚动加载参数；`crawl_heimao` MUST 读取并应用；CrawlProfile API MAY 通过白名单暴露下列键。
+
+#### Scenario: 默认 scroll 配置
+
+- **当** 未在 `config.json` 中覆盖 scroll 参数
+- **则** 必须使用 `config.py` DEFAULT：`scroll_times_per_page=3`、`scroll_pixels=1500`、`scroll_wait_seconds=2`、`scroll_to_bottom=true`
+
+#### Scenario: 内部滚动容器
+
+- **当** 管理员设置 `scroll_container_selector` 为非空 CSS 选择器
+- **则** `heimao_scroll_load_batch` MUST 滚动该容器而非仅 window
+
+#### Scenario: heimao 关键词数量
+
+- **当** `max_keywords_per_partner=0`（默认）
+- **则** heimao CrawlAdapter MUST 对合作方爬取全部 `partner_search_keywords`
+- **当** `max_keywords_per_partner>0`
+- **则** MUST 仅爬取前 N 个关键词
 
 ### Requirement: heimao routine 空结果直接跳过
 
@@ -350,7 +381,7 @@ heimao CrawlAdapter 在 legacy routine crawl MUST 在关键词无投诉链接时
 #### Scenario: heimao early_stop 键
 
 - **当** 读取 `config.heimao.early_stop`
-- **则** 必须支持：`enabled`、`min_pages`、`empty_pages_threshold`、`protect_first_page`、`empty_page_retry`
+- **则** 必须支持：`enabled`、`min_pages`、`protect_first_page`、`empty_page_retry`、`end_texts`、`end_selectors`、`saturation_rounds`
 
 #### Scenario: xhs early_stop 键
 

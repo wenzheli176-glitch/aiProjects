@@ -58,16 +58,25 @@ intel_bp = Blueprint('intel', __name__, url_prefix='/api')
 
 _registered = False
 
+from api_auth import check_intel_api_auth
+
+
+@intel_bp.before_request
+def _intel_api_auth_guard():
+    return check_intel_api_auth()
+
 
 def _enrich_task(task):
     from intel.db import count_incomplete_work, find_resumable_run_id, list_resume_sources
-    from intel.run_state import is_monitor_busy
+    from intel.run_state import is_monitor_busy, is_reanalyze_allowed
     from intel.scheduler import get_next_run_at
 
     t = dict(task)
     t['raw_count'] = count_raw_records(task['id'])
     t['intel_count'] = count_intel_records_for_task(task['id'])
     busy = is_monitor_busy()
+    can_inc, inc_reason = is_reanalyze_allowed(task['id'], 'incremental')
+    can_full, full_reason = is_reanalyze_allowed(task['id'], 'full_replace')
     resume_run_id = find_resumable_run_id(task['id'], task)
     incomplete = count_incomplete_work(task['id'], run_id=resume_run_id) if resume_run_id else 0
     resume_sources = list_resume_sources(task['id'], resume_run_id, task) if resume_run_id else []
@@ -75,7 +84,10 @@ def _enrich_task(task):
     t['resume_sources'] = resume_sources
     t['incomplete_subtasks'] = incomplete
     is_active = task['status'] in ('crawling', 'analyzing')
-    t['can_reanalyze'] = t['raw_count'] > 0 and not busy
+    t['can_reanalyze'] = can_inc
+    t['can_reanalyze_full'] = can_full
+    t['reanalyze_block_reason'] = inc_reason if not can_inc else ''
+    t['reanalyze_full_block_reason'] = full_reason if not can_full else ''
     t['can_run'] = not busy and not is_active and task['status'] != 'paused'
     t['can_pause'] = is_active
     t['can_stop'] = is_active
@@ -501,6 +513,16 @@ def api_monitor_run():
     analyze_mode = data.get('analyze_mode') or 'incremental'
     if analyze_mode not in ('incremental', 'full_replace'):
         analyze_mode = 'incremental'
+    crawl_only = data.get('crawl_only')
+    if crawl_only is None:
+        crawl_only = bool(task.get('crawl_only'))
+        if not crawl_only:
+            from config import cfg
+            crawl_only = bool(cfg('monitor', 'default_crawl_only', default=False))
+    else:
+        crawl_only = bool(crawl_only)
+    if crawl_only and analyze_mode == 'full_replace':
+        return jsonify({'ok': False, 'msg': 'crawl_only 与 full_replace 不能同时使用'}), 400
     business_spec = data.get('business_spec')
     if business_spec is not None and not isinstance(business_spec, dict):
         business_spec = None
@@ -513,6 +535,7 @@ def api_monitor_run():
                 trigger='manual',
                 analyze_mode=analyze_mode,
                 business_spec=business_spec,
+                crawl_only=crawl_only,
             )
         except Exception as e:
             from intel.error_util import format_exception
@@ -526,7 +549,7 @@ def api_monitor_run():
                 pass
 
     threading.Thread(target=_run, daemon=True).start()
-    return jsonify({'ok': True, 'task_id': task_id, 'analyze_mode': analyze_mode})
+    return jsonify({'ok': True, 'task_id': task_id, 'analyze_mode': analyze_mode, 'crawl_only': crawl_only})
 
 
 @intel_bp.route('/monitor/tasks/<int:task_id>/pause', methods=['POST'])
@@ -730,9 +753,8 @@ def api_monitor_retry_keywords():
 @intel_bp.route('/monitor/reanalyze', methods=['POST'])
 def api_monitor_reanalyze():
     from crawler_web import S, log
+    from intel.run_state import is_reanalyze_allowed
 
-    if S.running:
-        return jsonify({'ok': False, 'msg': '已有任务进行中'})
     data = request.get_json() or {}
     task_id = data.get('task_id')
     if not task_id:
@@ -746,6 +768,17 @@ def api_monitor_reanalyze():
     if analyze_mode not in ('incremental', 'full_replace'):
         replace = data.get('replace', True)
         analyze_mode = 'full_replace' if replace else 'incremental'
+
+    allowed, block_msg = is_reanalyze_allowed(task_id, analyze_mode)
+    if not allowed:
+        return jsonify({'ok': False, 'msg': block_msg or '不可重分析'})
+
+    active_incremental = (
+        analyze_mode == 'incremental'
+        and task.get('status') in ('crawling', 'analyzing')
+    )
+    if S.running and not active_incremental:
+        return jsonify({'ok': False, 'msg': '已有任务进行中'})
 
     def _run():
         try:
@@ -801,7 +834,7 @@ def _intel_records_filters(args):
 def api_intel_records():
     args = request.args
     page = int(args.get('page', 1))
-    page_size = min(int(args.get('page_size', 50)), 500)
+    page_size = min(max(int(args.get('page_size', 20)), 1), 200)
     filters = _intel_records_filters(args)
     result = list_intel_records(
         page=page,
@@ -841,7 +874,7 @@ def _raw_list_filters():
 def api_raw_records():
     args = request.args
     page = int(args.get('page', 1))
-    page_size = min(int(args.get('page_size', 50)), 500)
+    page_size = min(max(int(args.get('page_size', 20)), 1), 200)
     result = list_raw_records_paged(
         page=page,
         page_size=page_size,
@@ -891,7 +924,7 @@ def api_analysis_config_get():
 @require_admin
 def api_analysis_config_post():
     from crawler_web import S
-    from config import get_config, save_config, load_config
+    from config import get_config, save_config, load_config, _deep_merge
 
     if S.running:
         return jsonify({'ok': False, 'msg': '任务进行中，请先停止再保存配置'})
@@ -906,6 +939,10 @@ def api_analysis_config_post():
         if key in ('api_key',) and val in ('', '***已配置***'):
             continue
         if key == 'system_prompt':
+            continue
+        if key == 'list_triage' and isinstance(val, dict):
+            base_lt = merged.get('list_triage') if isinstance(merged.get('list_triage'), dict) else {}
+            merged['list_triage'] = _deep_merge(base_lt, val)
             continue
         merged[key] = val
 
@@ -938,14 +975,27 @@ def api_analysis_jobs_list():
 def api_analysis_logs_list():
     task_id = request.args.get('task_id', type=int)
     job_id = request.args.get('job_id', type=int)
+    phase = (request.args.get('phase') or '').strip() or None
     limit = min(int(request.args.get('limit', 100)), 500)
-    logs = list_analysis_logs(task_id=task_id, job_id=job_id, limit=limit)
+    logs = list_analysis_logs(task_id=task_id, job_id=job_id, phase=phase, limit=limit)
     jobs = list_analysis_jobs(task_id=task_id, limit=1) if task_id else list_analysis_jobs(limit=1)
     latest_job = jobs[0] if jobs else None
     return jsonify({
         'ok': True,
         'logs': logs,
         'latest_job': latest_job,
+    })
+
+
+@intel_bp.route('/analysis/usage', methods=['GET'])
+def api_analysis_usage():
+    from intel.db import aggregate_llm_usage
+
+    days = request.args.get('days', type=int) or 30
+    task_id = request.args.get('task_id', type=int)
+    return jsonify({
+        'ok': True,
+        'usage': aggregate_llm_usage(days=days, task_id=task_id),
     })
 
 
@@ -1028,7 +1078,11 @@ def api_intel_export():
 
 
 def register_intel_routes(app):
+    if 'intel' in app.blueprints:
+        return
     _ensure_registry()
+    from api_auth import register_api_auth_routes
+    register_api_auth_routes(app)
     app.register_blueprint(intel_bp)
     try:
         from intel.scheduler import init_scheduler

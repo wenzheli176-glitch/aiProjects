@@ -163,3 +163,28 @@ python scripts/sync_verification_tasks.py scan
 - [x] 6.3 多 keyword Run：子任务 Tab 见账号列交替；单号 diagnose 失败自动换号
 - [x] 6.4 监测 Run 进行中 `login/start` 返回 409
 - [ ] 验证完成后 `python scripts/sync_verification_tasks.py push`
+
+## monitor-crawl-only-run
+
+<!-- archive: openspec/changes/archive/2026-06-26-monitor-crawl-only-run/tasks.md -->
+
+- [x] 6.1 勾选「仅爬取」执行混合源任务：Run 在 crawl 后结束，无 analyzing 阶段，Chrome 已释放
+- [x] 6.2 对同一任务点「增量 AI」：intel 正常写入，与 crawl_only Run 解耦
+- [x] 6.3 crawl_only + 有限 task_timeout：爬取可用时间大于非 crawl_only 同配置
+- [x] 验证完成后 `python scripts/sync_verification_tasks.py push`
+
+## heimao-scroll-load
+
+<!-- archive: openspec/changes/archive/2026-06-26-heimao-scroll-load/tasks.md -->
+
+- [x] 4.1 监测任务黑猫下拉加载：日志见「黑猫下拉加载」与「本轮: +N」，采集量显著高于 60 条
+- [x] 验证完成后 `python scripts/sync_verification_tasks.py push`
+
+## pipeline-analyze-during-crawl
+
+<!-- change: openspec/changes/pipeline-analyze-during-crawl/tasks.md -->
+
+- [ ] 7.4 Run 内 investigation 与 analyze wall-clock 重叠：日志见 `[analyze_drain] batch`，progress 有 `analyze_drain.done` 增长
+- [ ] 7.4 定时兜底：长时间无新勘察 batch 时见 `[analyze_drain] timer`
+- [ ] 7.4 crawling 态手动「增量 AI」可用，「全量 AI」禁用并 tooltip 说明
+- [ ] 7.4 Run 收尾无 remaining detail 时日志「during-crawl drain 已完成，跳过收尾 AI 分析」

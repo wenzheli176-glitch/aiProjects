@@ -317,6 +317,34 @@ def mark_skipped(item_id, skip_reason=''):
     conn.commit()
 
 
+def update_work_item_progress(item_id, progress_patch):
+    """合并勘察等工作项 payload 内的进度字段（progress_done 等）。"""
+    if not item_id or not isinstance(progress_patch, dict):
+        return
+    conn = get_connection()
+    row = conn.execute(
+        'SELECT payload_json FROM crawl_work_queue WHERE id=?', (item_id,),
+    ).fetchone()
+    if not row:
+        return
+    try:
+        payload = json.loads(row['payload_json'] or '{}')
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    payload.update(progress_patch)
+    conn.execute(
+        'UPDATE crawl_work_queue SET payload_json=?, updated_at=? WHERE id=?',
+        (json.dumps(payload, ensure_ascii=False), _now(), item_id),
+    )
+    conn.commit()
+
+
+def _investigation_batch_size():
+    return max(1, int(cfg('monitor', 'investigation_batch_size', default=20) or 20))
+
+
 def _parse_ts(iso_s):
     if not iso_s:
         return None
@@ -593,7 +621,7 @@ def wait_queue_barrier(run_id, timeout_check=None, poll_sec=2, log_fn=None, on_p
 
 
 def enqueue_investigation_work_items(run_id, task_id, source_ids=None):
-    """将 investigation_queue 按 source 分组写入 crawl_work_queue。"""
+    """将 investigation_queue 按 source 分组、按批次写入 crawl_work_queue。"""
     from intel.db import list_investigation_queue, list_raw_records
 
     allowed = set(source_ids or [])
@@ -609,30 +637,53 @@ def enqueue_investigation_work_items(run_id, task_id, source_ids=None):
             continue
         by_source.setdefault(sid, []).append(item)
 
+    batch_size = _investigation_batch_size()
     count = 0
     source_ids = []
     for source_id, items in by_source.items():
-        payload_items = []
+        payload_items_all = []
         for it in items:
             raw = raw_by_id.get(it.get('raw_id')) or {}
             payload = raw.get('payload') or {}
             kw = (payload.get('_search_keyword') or raw.get('keyword') or '').strip()
-            payload_items.append({
+            payload_items_all.append({
                 'queue_id': it['id'],
                 'raw_id': it.get('raw_id'),
                 'url': it.get('url') or '',
                 'keyword': kw,
             })
-        priority = max((float(it.get('priority_score') or 0) for it in items), default=0)
-        enqueue_item(
-            run_id, task_id, source_id, 'investigation',
-            {
-                'items': payload_items,
-                'queue_item_ids': [it['id'] for it in items],
-                'urls': [it.get('url') or '' for it in items],
-            },
-            priority_score=priority,
-        )
-        count += 1
+        inv_total = len(payload_items_all)
+        batch_total = (inv_total + batch_size - 1) // batch_size if inv_total else 0
+        for bi in range(batch_total):
+            chunk_items = items[bi * batch_size:(bi + 1) * batch_size]
+            chunk = []
+            for it in chunk_items:
+                raw = raw_by_id.get(it.get('raw_id')) or {}
+                payload = raw.get('payload') or {}
+                kw = (payload.get('_search_keyword') or raw.get('keyword') or '').strip()
+                chunk.append({
+                    'queue_id': it['id'],
+                    'raw_id': it.get('raw_id'),
+                    'url': it.get('url') or '',
+                    'keyword': kw,
+                })
+            if not chunk:
+                continue
+            priority = max((float(it.get('priority_score') or 0) for it in chunk_items), default=0)
+            enqueue_item(
+                run_id, task_id, source_id, 'investigation',
+                {
+                    'items': chunk,
+                    'queue_item_ids': [it['queue_id'] for it in chunk],
+                    'urls': [it.get('url') or '' for it in chunk],
+                    'batch_index': bi + 1,
+                    'batch_total': batch_total,
+                    'investigation_total': inv_total,
+                    'progress_done': 0,
+                    'progress_total': len(chunk),
+                },
+                priority_score=priority,
+            )
+            count += 1
         source_ids.append(source_id)
     return count, source_ids

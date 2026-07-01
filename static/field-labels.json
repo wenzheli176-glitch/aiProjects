@@ -379,10 +379,16 @@
       "help": ""
     },
     "batch_size": {
-      "label": "批大小",
+      "label": "分析批大小",
       "group": "analysis",
       "type": "number",
       "help": ""
+    },
+    "parallel_batches": {
+      "label": "并行批数",
+      "group": "analysis",
+      "type": "number",
+      "help": "同时发起的分析 API 请求数"
     },
     "max_body_chars": {
       "label": "正文最大字符",
@@ -564,6 +570,24 @@
       "type": "number",
       "help": ""
     },
+    "list_triage.batch_size": {
+      "label": "初筛批大小",
+      "group": "analysis",
+      "type": "number",
+      "help": "爬取阶段 list_triage 每批条数"
+    },
+    "list_triage.max_body_chars": {
+      "label": "初筛正文最大字符",
+      "group": "analysis",
+      "type": "number",
+      "help": ""
+    },
+    "list_triage.enabled": {
+      "label": "启用列表初筛",
+      "group": "analysis",
+      "type": "checkbox",
+      "help": ""
+    },
     "risk_types": {
       "label": "风险类型",
       "group": "intel",
@@ -592,13 +616,13 @@
       "label": "分析预留超时",
       "group": "monitor",
       "type": "number",
-      "help": "从 task_timeout 预留的 AI 分析预算（秒）；应小于任务总超时"
+      "help": "从总时长预留的 AI 分析预算（秒）；过大将压缩爬取时间"
     },
     "min_crawl_timeout_sec": {
       "label": "爬取保底超时",
       "group": "monitor",
       "type": "number",
-      "help": "爬取阶段（含 list/investigation）最少可用秒数"
+      "help": "爬取阶段最少 wall-clock 秒数（秒）"
     },
     "default_sources": {
       "label": "默认来源",
@@ -809,30 +833,6 @@
       "group": "monitor_run",
       "type": "number",
       "help": "本 run 或 source 合计 token"
-    },
-    "industry_cohort": {
-      "label": "行业 cohort",
-      "group": "partner",
-      "type": "text",
-      "help": "开放标签；同 cohort 合作方在 list 模式合并监测关键词，可留空"
-    },
-    "partner_cohort_suggest.enabled": {
-      "label": "启用 cohort 推荐",
-      "group": "analysis",
-      "type": "checkbox",
-      "help": "合作方表单「获取推荐」"
-    },
-    "partner_cohort_suggest.web_search_enabled": {
-      "label": "cohort 推荐联网",
-      "group": "analysis",
-      "type": "checkbox",
-      "help": "DuckDuckGo 摘要拼入 prompt；失败降级 LLM-only"
-    },
-    "partner_cohort_suggest.max_candidates": {
-      "label": "cohort 候选数",
-      "group": "analysis",
-      "type": "number",
-      "help": "1–10"
     }
   },
   "elementIds": {
@@ -844,7 +844,11 @@
     "aiKeyEnv": "api_key_env",
     "aiKey": "api_key",
     "aiBatch": "batch_size",
+    "aiParallelBatches": "parallel_batches",
     "aiBodyMax": "max_body_chars",
+    "aiTriageBatch": "list_triage.batch_size",
+    "aiTriageBodyMax": "list_triage.max_body_chars",
+    "aiTriageEnabled": "list_triage.enabled",
     "aiRetries": "max_retries",
     "aiRetryDelay": "retry_delay_sec",
     "aiTemp": "temperature",

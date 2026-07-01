@@ -99,7 +99,7 @@ curl -X POST http://localhost:5000/api/stop
 
 ## Cookie 失效怎么办？
 
-1. 打开 **Cookie 实例** Tab → 对应源/实例 → 粘贴新 Cookie → **保存** → **诊断**（需管理员）。
+1. 打开 **Cookie 实例** Tab → 对应源/实例 → 粘贴新 Cookie → **保存** → **诊断**（需管理员 Session 或 API Key）。
 2. 或删除 `credentials/*_cookies.json` 后重新 `setup_cookies.bat` / 扫码登录。
 3. 若 profile 登录态损坏，可删除对应 `chrome_*_profile/` 或 `chrome_profiles/xhs_*` 后重登。
 

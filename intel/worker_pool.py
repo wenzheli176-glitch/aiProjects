@@ -281,8 +281,19 @@ def run_investigation_crawl_with_workers(
     sources,
     log_fn=None,
     timeout_check=None,
+    run_metrics=None,
+    crawl_only=None,
 ):
+    from intel.db import get_monitor_task, sync_task_subtask_progress
+
+    task = get_monitor_task(task_id)
+    partners = None
+    if task:
+        from intel.runner import _get_enabled_partners
+        partners = _get_enabled_partners(task)
+
     n, source_ids = enqueue_investigation_work_items(run_id, task_id, source_ids=sources)
+    sync_task_subtask_progress(task_id, run_id)
     if log_fn:
         log_fn('[orchestrator] 入队 investigation 工作项 %d 个（源: %s）' % (
             n, ','.join(source_ids) or '-',
@@ -296,9 +307,20 @@ def run_investigation_crawl_with_workers(
             log_fn('[orchestrator] investigation 无可用 Worker', 'ERROR')
         return False
 
+    def on_poll():
+        sync_task_subtask_progress(task_id, run_id)
+        from intel.analyze_drain import maybe_timer_drain_analyze
+        maybe_timer_drain_analyze(
+            task_id, run_id, task=task, partners=partners, run_metrics=run_metrics,
+            log_fn=log_fn, crawl_only=crawl_only, timeout_check=timeout_check,
+        )
+
     _register_worker_procs(run_id, entries)
     try:
-        return wait_queue_barrier(run_id, timeout_check=timeout_check, log_fn=log_fn)
+        return wait_queue_barrier(
+            run_id, timeout_check=timeout_check, log_fn=log_fn, on_poll=on_poll,
+        )
     finally:
         _join_worker_processes(entries)
         _unregister_worker_procs(run_id, entries)
+        sync_task_subtask_progress(task_id, run_id)

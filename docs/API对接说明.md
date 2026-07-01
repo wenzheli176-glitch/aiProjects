@@ -1,12 +1,46 @@
 # 情报 API 对接说明
 
-面向内网业务系统对接 **IntelRecord**。读接口（GET）内网开放；**写接口**（配置、合作方、任务 CRUD、源 PATCH）需先 `POST /api/admin/login`（`config.admin.enabled=true` 时）。开发模式可设 `admin.enabled=false`。
+面向内网业务系统 / 风险监控系统对接 **IntelRecord**。
 
-## 管理员鉴权
+> **风险监控系统专用精简版**（含完整请求/响应示例）：[`风险监控系统对接API.md`](风险监控系统对接API.md)
+
+## API Key 鉴权（合作方 / 任务 / 情报）
+
+当 `config.api_auth.enabled=true`（默认）时，以下路径 **全部** 须携带有效密钥：
+
+- `/api/partners*` — 合作方 CRUD、优先级、cohort 推荐
+- `/api/monitor*` — 监测任务 CRUD、执行、Run、子任务控制
+- `/api/intel*` — 情报查询与导出
+- `/api/dashboard/summary` — 看板 KPI
+- `/api/admin/purge/intel` — 按任务清理情报
+
+**Web 控制台**：管理员登录 Session 仍可访问（`allow_admin_session=true`）。
+
+| 方式 | 示例 |
+|------|------|
+| Bearer | `Authorization: Bearer <your-key>` |
+| Header | `X-API-Key: <your-key>` |
+| Query（仅 GET） | `?api_key=<your-key>`（不推荐） |
+
+密钥配置（任选其一或多条）：
+
+| 来源 | 说明 |
+|------|------|
+| 环境变量 `INTEL_API_KEY` | 主密钥（默认读取名见 `api_auth.key_env`） |
+| 环境变量 `INTEL_API_KEYS` | 逗号分隔多密钥轮换 |
+| `config.json` → `api_auth.keys[]` | 静态密钥列表 |
+
+探活：`GET /api/integration/auth/status`（可带 Key 查看 `authenticated` / `via`）
+
+本地开发可设 `api_auth.enabled=false` 恢复旧行为（读接口无 Key）。
+
+## 写操作鉴权（`@require_admin`）
+
+合作方/任务 CRUD、配置、数据源 profile、Cookie、Prompt 等 **写操作** 均受 `@require_admin` 保护：须 **管理员 Session 或 API Key**（`config.admin.enabled=true` 时）。控制台可 `POST /api/admin/login` 获取 Session；业务系统携带 API Key 即可，**无需** Session。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/admin/login` | `{password}`，成功 Set-Cookie |
+| POST | `/admin/login` | `{password}`，成功 Set-Cookie（仅控制台） |
 | POST | `/admin/logout` | 清除 Session |
 | GET | `/admin/session` | `{logged_in, role, auth_enabled}` |
 
@@ -17,8 +51,8 @@
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/sources?detail=1` | 含 enabled/registered/profile_keys；`notice` 说明不可 UI 加源 |
-| PATCH | `/sources/{id}` | 管理员：`{enabled, label}` |
-| GET/PATCH | `/sources/{id}/profile` | CrawlProfile 白名单字段；PATCH 需管理员 |
+| PATCH | `/sources/{id}` | 需管理员 Session 或 API Key：`{enabled, label}` |
+| GET/PATCH | `/sources/{id}/profile` | CrawlProfile 白名单字段；PATCH 需管理员 Session 或 API Key |
 | GET/PATCH | `/monitor/defaults` | 默认源/页数/超时 |
 
 ## 基础 URL
@@ -39,9 +73,9 @@
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/partners` | 名单列表，`?enabled_only=1` 仅启用；每条含 `stats`（`intel_medium_plus`、`intel_total`、`raw_total`、`default_task_id`） |
-| POST | `/partners` | 创建（**需管理员**） |
-| PUT | `/partners/{id}` | 更新（**需管理员**） |
-| DELETE | `/partners/{id}` | 删除（**需管理员**） |
+| POST | `/partners` | 创建（**需管理员 Session 或 API Key**） |
+| PUT | `/partners/{id}` | 更新（**需管理员 Session 或 API Key**） |
+| DELETE | `/partners/{id}` | 删除（**需管理员 Session 或 API Key**） |
 | GET | `/partners/priority` | 各合作方 P0/P1/P2 定级与来源 |
 | PATCH | `/partners/{id}/priority` | 业务指定 `{tier, reason?}` → `priority_source=business` |
 | POST | `/partners/bulk-priority` | 批量 `{items:[{partner_id,tier,reason?}]}` |
@@ -57,14 +91,14 @@
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/monitor/tasks` | 任务列表（含 `schedule`、`last_run`、`next_run_at`） |
-| POST | `/monitor/tasks` | 创建（**需管理员**）`{name, partner_ids[], sources[], max_pages, crawl_mode?, fetch_detail?, schedule?, business_spec?}`；`business_spec.ignore_before` 为 YYYY-MM-DD |
+| POST | `/monitor/tasks` | 创建（**需管理员 Session 或 API Key**）`{name, partner_ids[], sources[], max_pages, crawl_mode?, fetch_detail?, crawl_only?, schedule?, business_spec?}`；`business_spec.ignore_before` 为 YYYY-MM-DD |
 | GET | `/monitor/tasks/{id}` | 任务详情与状态 |
-| PUT | `/monitor/tasks/{id}` | 更新（**需管理员**），可含 `schedule`、`business_spec` |
-| DELETE | `/monitor/tasks/{id}` | 删除（**需管理员**） |
+| PUT | `/monitor/tasks/{id}` | 更新（**需管理员 Session 或 API Key**），可含 `schedule`、`business_spec`、`crawl_only` |
+| DELETE | `/monitor/tasks/{id}` | 删除（**需管理员 Session 或 API Key**） |
 | GET | `/monitor/tasks/{id}/runs` | Run 历史（分页） |
 | GET | `/monitor/runs/{run_id}` | Run 详情（分源 timing/token） |
-| POST | `/monitor/run` | 执行 `{task_id, analyze_mode?, business_spec?}`；`business_spec` 可含 `force_investigation_partner_ids[]`、`min_triage_relevance`、`ignore_before`（YYYY-MM-DD，分析跳过更早内容） |
-| POST | `/monitor/reanalyze` | 重跑 AI `{task_id, analyze_mode: incremental\|full_replace}`（`replace` 仍映射 full_replace） |
+| POST | `/monitor/run` | 执行 `{task_id, analyze_mode?, crawl_only?, business_spec?}`；`crawl_only=true` 时跳过最终 AI 分析（list_triage 仍执行）；与 `analyze_mode=full_replace` 互斥；未传时继承任务 `crawl_only` 或 `monitor.default_crawl_only` |
+| POST | `/monitor/reanalyze` | 重跑 AI `{task_id, analyze_mode: incremental\|full_replace}`（`replace` 仍映射 full_replace）；**crawling 态**允许同任务 **incremental**（detail-only drain），禁止 **full_replace** |
 
 `schedule` 对象：`{enabled, cron, timezone, preset_id, skip_if_running}`。Cron 由 Web UI 生成，不建议手改。
 
@@ -130,10 +164,10 @@ Query 参数：
 |------|------|------|
 | GET | `/analysis/prompts` | 列表 |
 | GET | `/analysis/prompts/{id}` | 详情含 body |
-| POST | `/analysis/prompts` | 新建（管理员） |
-| PUT | `/analysis/prompts/{id}` | 更新（管理员） |
-| POST | `/analysis/prompts/{id}/activate` | 设为当前（管理员） |
-| DELETE | `/analysis/prompts/{id}` | 删除非 builtin（管理员） |
+| POST | `/analysis/prompts` | 新建（需管理员 Session 或 API Key） |
+| PUT | `/analysis/prompts/{id}` | 更新（需管理员 Session 或 API Key） |
+| POST | `/analysis/prompts/{id}/activate` | 设为当前（需管理员 Session 或 API Key） |
+| DELETE | `/analysis/prompts/{id}` | 删除非 builtin（需管理员 Session 或 API Key） |
 
 ### 时间字段语义（BREAKING 文档）
 
@@ -178,17 +212,17 @@ score = relevance_to_number(record.relevance) * business_weight[record.source]
 
 ## Cookie 实例（Worker）
 
-面向多进程 Crawl Worker 的 Cookie 运维；读接口开放，写接口需管理员 Session。
+面向多进程 Crawl Worker 的 Cookie 运维；读接口开放，写接口需管理员 Session 或 API Key。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/cookie-instances` | 列出 `monitor.workers.*.instances`：source、instance_id、cdp_port、cookies_file、条数、最近 diagnose |
-| POST | `/cookie-instances/{source_id}/{instance_id}/upload` | `{cookies: "<JSON 数组或导出文本>"}` 写入实例 cookies_file（**需管理员**） |
-| POST | `/cookie-instances/{source_id}/{instance_id}/diagnose` | 手动登录诊断（**需管理员**）；结果缓存于 `credentials/.cookie_diagnose_cache.json` |
+| POST | `/cookie-instances/{source_id}/{instance_id}/upload` | `{cookies: "<JSON 数组或导出文本>"}` 写入实例 cookies_file（**需管理员 Session 或 API Key**） |
+| POST | `/cookie-instances/{source_id}/{instance_id}/diagnose` | 手动登录诊断（**需管理员 Session 或 API Key**）；结果缓存于 `credentials/.cookie_diagnose_cache.json` |
 
 ## 管理员数据清理
 
-**需管理员 Session**（`config.admin.enabled=true` 时）。
+**需管理员 Session 或 API Key**（`config.admin.enabled=true` 时）。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -219,9 +253,9 @@ score = relevance_to_number(record.relevance) * business_weight[record.source]
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/xhs/accounts` | 账号列表、enabled 数、是否低于 `min_accounts` |
-| POST | `/xhs/accounts` | 创建账号 `{label}`（**需管理员**） |
+| POST | `/xhs/accounts` | 创建账号 `{label}`（**需管理员 Session 或 API Key**） |
 | PATCH | `/xhs/accounts/{id}` | 更新 `label` / `enabled` / `cooldown_until` / `ban_note` |
-| DELETE | `/xhs/accounts/{id}` | 删除账号元数据（**需管理员**，不可删 acc-default） |
+| DELETE | `/xhs/accounts/{id}` | 删除账号元数据（**需管理员 Session 或 API Key**，不可删 acc-default） |
 | POST | `/xhs/accounts/{id}/cookies` | 粘贴 Cookie；可选 `diagnose: true` |
 | POST | `/xhs/accounts/{id}/diagnose` | 诊断该账号 Cookie |
 | POST | `/xhs/accounts/{id}/login/start` | 打开独立 Chrome 登录页（monitor busy 时 409） |
@@ -237,7 +271,8 @@ score = relevance_to_number(record.relevance) * business_weight[record.source]
 
 ### 并发与停止
 
-- 是否允许新 Run / reanalyze：查 `monitor_task_runs` 是否存在 `status` 为 running/crawling/analyzing 的记录（**非**仅内存 `S.running`）。
+- 是否允许新 Run / reanalyze：查 `monitor_task_runs` 是否存在 `status` 为 running/crawling/analyzing 的记录（**非**仅内存 `S.running`）。**例外**：任务 `status=crawling` 且非 `crawl_only` 时，同任务 `POST /monitor/reanalyze` + `analyze_mode=incremental` 可用（during-crawl detail drain）。
+- Run 内 **analyze drain**（`monitor.analyze_during_crawl`，默认 true）：investigation 每批完成 + 定时 poll（`analyze_drain_interval_sec`，默认 60s）对 `crawl_phase=detail` 做 incremental AI；收尾仅补漏剩余 detail pending。`progress.analyze_drain`：`{done, pending_detail, last_trigger, last_at}`。
 - `POST /api/stop`：对 active run 设 `stop_requested=1`；Orchestrator / Worker 轮询后中止。
 - `GET /api/status` 额外返回：
   - `worker_states`：各 Worker 实例状态（含 `login_wait`）
@@ -252,6 +287,10 @@ Run 详情 `GET /monitor/runs/{run_id}` 的 `stats_json` 常见扩展字段：
 | `worker_instances` | `[{source_id, instance_id, status, diagnose_ok, ...}]` |
 | `investigation_modal_done` | xhs 弹窗成功次数（Run 级） |
 | `investigation_skipped_quota` | 超 `max_modal_per_run` 跳过条数 |
+| `analyze_deferred` | `crawl_only` Run 为 true，表示已跳过最终 analyze |
+| `pending_analyze_raw_count` | 按 incremental 规则统计的待分析 raw 数 |
+
+Run 响应还含 `crawl_only`（bool）。
 
 中文标签见 `GET /api/field-labels` 或 `static/field-labels.json`（group=`monitor_run`）。
 

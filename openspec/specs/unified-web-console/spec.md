@@ -250,6 +250,32 @@ Run 详情 MAY 保留 keyword 子任务表；**任务详情 → 子任务 Tab** 
 - **WHEN** 用户点击任务列表行或「详情」
 - **THEN** MUST 打开任务详情（不得仅展开 Run Drawer 作为唯一入口）
 
+### Requirement: 仅爬取执行选项
+
+监测任务 UI MUST 提供「仅爬取（稍后 AI 分析）」选项；保存至任务配置并在执行时传给 `POST /api/monitor/run`。
+
+#### Scenario: 任务 Modal 配置 crawl_only
+
+- **WHEN** 用户在创建/编辑监测任务 Modal 勾选「仅爬取」
+- **THEN** MUST 将 `crawl_only=true` 持久化至任务记录
+- **AND** 加载任务编辑 MUST 回显该选项
+
+#### Scenario: 执行任务传递 crawl_only
+
+- **WHEN** 用户点击任务「执行」且任务或执行确认中 crawl_only 为 true
+- **THEN** MUST `POST /api/monitor/run` body 含 `crawl_only: true`
+
+#### Scenario: Run 历史待分析标识
+
+- **WHEN** Run 详情或执行历史中 `run.crawl_only=true` 且 `stats.analyze_deferred=true`
+- **THEN** MUST 显示「待分析」状态标签
+- **AND** MUST 提供「增量 AI」快捷操作（调用现有 reanalyze API）
+
+#### Scenario: 执行按钮 tooltip
+
+- **WHEN** 任务 crawl_only 为 true
+- **THEN** 执行按钮 title/tooltip MUST 说明「仅爬取，不执行 AI 分析」
+
 ### Requirement: 任务详情子任务 Tab
 
 子任务 Tab MUST 按数据源分块展示队列与 keyword 合并列表；每行 MUST 含细粒度状态（排队 / 爬取列表 / 勘察详情 / 分析 / 完成 / 失败）及三列阶段用时：**列表爬取**、**详情勘察**、**分析**（毫秒，运行中增量更新）。
@@ -271,9 +297,37 @@ Run 详情 MAY 保留 keyword 子任务表；**任务详情 → 子任务 Tab** 
 - **WHEN** xhs 源存在 failed 子任务
 - **THEN** MUST 提供「重跑失败」按钮调用 `POST /api/monitor/retry-keywords`
 
+### Requirement: 源数据与情报中心列表分页
+
+系统 SHALL 在统一 Web 壳「源数据」Tab 与「情报中心」Tab 的主列表提供分页控件；默认每页 20 条，可选 50/100/200；MUST 与后端 `page` / `page_size` 参数一致。
+
+#### Scenario: 默认分页
+
+- **WHEN** 用户打开源数据或情报中心 Tab 且无 URL query
+- **THEN** MUST 请求 `page=1` 且 `page_size=20`
+- **且** 列表下方 MUST 展示「第 X / Y 页」与上一页/下一页
+
+#### Scenario: 计数展示
+
+- **WHEN** API 返回 `total` 大于 0
+- **THEN** MUST 展示「共 N 条 · 第 start–end 条」摘要
+- **且** 不得仅显示当前页行数而隐藏全量 total
+
+#### Scenario: URL 持久化
+
+- **WHEN** 用户切换页码或每页条数
+- **THEN** MUST 更新 URL query（`raw_page` / `raw_page_size` 或 `intel_page` / `intel_page_size`）
+- **且** 刷新页面 MUST 恢复相同分页状态
+
+#### Scenario: API 上限
+
+- **WHEN** 客户端请求 `page_size` 大于 200
+- **THEN** 服务端 MUST clamp 为 200
+- **且** 小于 1 时 MUST 视为 1
+
 ### Requirement: 任务详情源数据与情报 Tab
 
-详情页源数据/情报 Tab MUST 展示该任务下 raw/intel 列表（各最多 100 条）；运行中轮询 MUST 增量 patch 表格行，保留滚动位置，不得闪屏。
+详情页源数据/情报 Tab MUST 展示该任务下 raw/intel 列表（各最多 100 条）；运行中轮询 MUST 增量 patch 表格行，保留滚动位置，不得闪屏。**全局**源数据 Tab 与情报中心 Tab MUST 使用分页（见「源数据与情报中心列表分页」），不得固定仅请求第一页 100 条。
 
 #### Scenario: 手动刷新
 
@@ -282,7 +336,7 @@ Run 详情 MAY 保留 keyword 子任务表；**任务详情 → 子任务 Tab** 
 
 #### Scenario: 自动刷新
 
-- **WHEN** 任务运行中且用户位于源数据或情报 Tab
+- **WHEN** 任务运行中且用户位于任务详情内的源数据或情报 Tab
 - **THEN** MUST 仅更新变更行与计数
 - **且** 新增行插入列表顶部时 MUST 补偿 scrollTop
 

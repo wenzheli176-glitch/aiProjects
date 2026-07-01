@@ -23,6 +23,7 @@ def _merge_keyword_stats(existing_stats, stats):
             stats[key] = val
     return stats
 from intel.investigation import row_needs_investigation
+from intel.ignore_before import resolve_ignore_before
 from intel.triage import run_list_triage
 
 
@@ -199,7 +200,7 @@ def run_xhs_keyword_pipeline(
         'investigation_skipped': 0,
         'phase_timing_ms': {
             'list_crawl_ms': 0,
-            'analyze_ms': 0,
+            'triage_ms': 0,
             'investigation_ms': 0,
         },
     }
@@ -254,7 +255,12 @@ def run_xhs_keyword_pipeline(
         insert_result = insert_raw_records(
             task_id, None, 'xhs', keyword, records,
             run_metrics=run_metrics, crawl_phase='list',
+            ignore_before=resolve_ignore_before(task=task),
         )
+        skip_ib = int(insert_result.get('skipped_ignore_before') or 0)
+        if skip_ib:
+            ib = resolve_ignore_before(task=task)
+            _log(ctx, '[xhs] 列表忽略早于 %s 跳过 %d 条（未入库）' % (ib, skip_ib))
         raw_ids = insert_result.get('ids') or []
         stats['list_count'] = len(raw_ids)
 
@@ -270,12 +276,12 @@ def run_xhs_keyword_pipeline(
         raw_rows = list_raw_records_by_ids(task_id, raw_ids)
         triage_result = run_list_triage(
             task_id, raw_rows, partners,
-            log_fn=ctx.get('log'), run_metrics=run_metrics,
+            log_fn=ctx.get('log'), run_metrics=run_metrics, run_id=ctx.get('run_id'),
         )
         stats['triage_processed'] = triage_result.get('processed', 0)
         raw_rows = list_raw_records_by_ids(task_id, raw_ids)
 
-        phase_started = _flush_phase_timing('analyze_ms', phase_started)
+        phase_started = _flush_phase_timing('triage_ms', phase_started)
 
         if keyword_run_id:
             _mark_phase_start('investigation')
@@ -302,6 +308,14 @@ def run_xhs_keyword_pipeline(
 
         phase_started = _flush_phase_timing('investigation_ms', phase_started)
 
+        run_id_val = ctx.get('run_id')
+        if run_id_val and task_id:
+            from intel.analyze_drain import maybe_batch_drain_analyze
+            maybe_batch_drain_analyze(
+                task_id, run_id_val, task=task, run_metrics=run_metrics,
+                log_fn=lambda msg, level='INFO': _log(ctx, msg, level),
+            )
+
         if kw_check() and time.monotonic() >= started_mono + int(
             ctx.get('keyword_timeout_sec') or _keyword_timeout_sec()
         ):
@@ -327,7 +341,7 @@ def run_xhs_keyword_pipeline(
         run_id_val = (crawl_ctx or {}).get('run_id')
         if keyword_run_id and phase_started is not None:
             phase = stats.get('_current_phase') or 'list'
-            key_map = {'list': 'list_crawl_ms', 'triage': 'analyze_ms', 'investigation': 'investigation_ms'}
+            key_map = {'list': 'list_crawl_ms', 'triage': 'triage_ms', 'investigation': 'investigation_ms'}
             _flush_phase_timing(key_map.get(phase, 'list_crawl_ms'), phase_started)
         if keyword_run_id and run_id_val and is_halt_requested(run_id_val):
             update_keyword_run(

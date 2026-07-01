@@ -2,10 +2,11 @@
 """监测任务爬取/分析 wall-clock 预算分配。"""
 
 
-def compute_monitor_deadlines(task_timeout_sec, analysis_timeout_sec, min_crawl_timeout_sec):
+def compute_monitor_deadlines(task_timeout_sec, analysis_timeout_sec, min_crawl_timeout_sec, crawl_only=False):
     """返回 task_timeout / analysis_reserve / crawl_budget（秒）。
 
     task_timeout_sec <= 0 表示关闭整体超时限制（unlimited=True）。
+    crawl_only=True 时不预留分析时间，全部预算用于爬取。
     """
     raw_task = int(task_timeout_sec if task_timeout_sec is not None else 7200)
     if raw_task <= 0:
@@ -16,6 +17,13 @@ def compute_monitor_deadlines(task_timeout_sec, analysis_timeout_sec, min_crawl_
             'unlimited': True,
         }
     task = max(60, raw_task)
+    if crawl_only:
+        return {
+            'task_timeout_sec': task,
+            'analysis_reserve_sec': 0,
+            'crawl_budget_sec': task,
+            'unlimited': False,
+        }
     analysis_cfg = int(analysis_timeout_sec or 3600)
     min_crawl = max(60, int(min_crawl_timeout_sec or 1800))
 
@@ -40,12 +48,12 @@ def compute_monitor_deadlines(task_timeout_sec, analysis_timeout_sec, min_crawl_
     }
 
 
-def monitor_timeout_config_from_cfg(cfg_fn):
+def monitor_timeout_config_from_cfg(cfg_fn, crawl_only=False):
     """从 config.cfg('monitor', ...) 读取并计算预算。"""
     task = cfg_fn('monitor', 'task_timeout_sec', default=7200)
     analysis = cfg_fn('monitor', 'analysis_timeout_sec', default=3600)
     min_crawl = cfg_fn('monitor', 'min_crawl_timeout_sec', default=1800)
-    budget = compute_monitor_deadlines(task, analysis, min_crawl)
+    budget = compute_monitor_deadlines(task, analysis, min_crawl, crawl_only=crawl_only)
     budget['analysis_timeout_sec'] = int(analysis or 3600)
     budget['min_crawl_timeout_sec'] = int(min_crawl or 1800)
     return budget

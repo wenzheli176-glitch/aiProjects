@@ -6,6 +6,8 @@ const runHistoryState = {};
 let expandedRunHistoryTaskId = null;
 let selectedRunId = null;
 let selectedRunTaskId = null;
+let intelListPage = 1;
+let intelListPageSize = LIST_PAGE_SIZE_DEFAULT;
 
 function toastMsg(msg, isErr) {
   if (window.App && App.showToast) App.showToast(msg, isErr);
@@ -62,6 +64,8 @@ function syncIntelFiltersFromQuery() {
   set('fSentimentMin', 'sentiment_score_min');
   set('fSentimentMax', 'sentiment_score_max');
   if (q.get('task_id')) lastTaskId = parseInt(q.get('task_id'), 10) || lastTaskId;
+  if (q.get('intel_page')) intelListPage = Math.max(1, parseInt(q.get('intel_page'), 10) || 1);
+  if (q.get('intel_page_size')) intelListPageSize = clampListPageSize(q.get('intel_page_size'));
 }
 
 function showIntelList() {
@@ -520,6 +524,139 @@ function aiLogStatusTag(status) {
   return `<span class="tag ${cls[status] || ''}">${cn[status] || esc(status)}</span>`;
 }
 
+function aiPhaseLabel(phase) {
+  return { list_triage: '初筛', analysis: '分析' }[phase] || phase || '分析';
+}
+
+function fmtTokens(n) {
+  const v = Number(n) || 0;
+  return v.toLocaleString('zh-CN');
+}
+
+function fmtUsageCalls(u) {
+  u = u || {};
+  return `${u.api_calls || 0} / ${u.mock_calls || 0} / ${u.failed_calls || 0}`;
+}
+
+function renderUsagePhaseBars(byPhase, totalTokens) {
+  const el = document.getElementById('aiUsageByPhase');
+  if (!el) return;
+  const phases = [
+    { key: 'list_triage', label: '初筛', cls: 'triage' },
+    { key: 'analysis', label: '分析', cls: 'analysis' },
+  ];
+  const max = Math.max(totalTokens || 0, 1);
+  el.innerHTML = phases.map(p => {
+    const u = (byPhase && byPhase[p.key]) || {};
+    const tt = u.total_tokens || 0;
+    const pct = Math.max(2, Math.round((tt / max) * 100));
+    return `<div class="usage-phase-row">
+      <span>${p.label}</span>
+      <div class="usage-phase-bar"><span class="${p.cls}" style="width:${pct}%"></span></div>
+      <span>${fmtTokens(tt)} · ${fmtUsageCalls(u)}</span>
+    </div>`;
+  }).join('');
+}
+
+function renderUsageInOut(periodTotal) {
+  const el = document.getElementById('aiUsageInOut');
+  if (!el) return;
+  const u = periodTotal || {};
+  const total = Math.max((u.prompt_tokens || 0) + (u.completion_tokens || 0), 1);
+  const inPct = Math.round(((u.prompt_tokens || 0) / total) * 100);
+  const outPct = 100 - inPct;
+  el.innerHTML = `
+    <div class="usage-phase-row"><span>输入</span><div class="usage-phase-bar"><span class="triage" style="width:${inPct}%"></span></div><span>${fmtTokens(u.prompt_tokens)}</span></div>
+    <div class="usage-phase-row"><span>输出</span><div class="usage-phase-bar"><span class="analysis" style="width:${outPct}%"></span></div><span>${fmtTokens(u.completion_tokens)}</span></div>
+    <p class="muted" style="margin:8px 0 0;font-size:12px">合计 ${fmtTokens(u.total_tokens)} · 耗时 ${fmtTokens(u.latency_ms)} ms</p>`;
+}
+
+function renderUsageDaily(daily) {
+  const el = document.getElementById('aiUsageDaily');
+  if (!el) return;
+  const rows = daily || [];
+  if (!rows.length) {
+    el.innerHTML = '<p class="empty">所选时间范围内暂无 LLM 调用记录</p>';
+    return;
+  }
+  const max = Math.max(...rows.map(d => (d.total && d.total.total_tokens) || 0), 1);
+  el.innerHTML = `<table><thead><tr>
+    <th>日期</th><th>用量</th><th>合计</th><th>初筛</th><th>分析</th><th>API</th>
+  </tr></thead><tbody>${rows.map(d => {
+    const t = d.total || {};
+    const tri = d.list_triage || {};
+    const ana = d.analysis || {};
+    const tt = t.total_tokens || 0;
+    const triPct = tt ? Math.round(((tri.total_tokens || 0) / tt) * 100) : 0;
+    const anaPct = tt ? Math.max(0, 100 - triPct) : 0;
+    return `<tr>
+      <td>${esc(d.date || '-')}</td>
+      <td><div class="usage-daily-bar" style="width:${Math.max(8, Math.round((tt / max) * 100))}%">
+        <span class="triage" style="width:${triPct}%"></span><span class="analysis" style="width:${anaPct}%"></span>
+      </div></td>
+      <td>${fmtTokens(tt)}</td>
+      <td>${fmtTokens(tri.total_tokens)}</td>
+      <td>${fmtTokens(ana.total_tokens)}</td>
+      <td>${fmtUsageCalls(t)}</td>
+    </tr>`;
+  }).join('')}</tbody></table>`;
+}
+
+function renderUsageByTask(byTask) {
+  const body = document.getElementById('aiUsageByTask');
+  if (!body) return;
+  const rows = byTask || [];
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="5" class="empty">暂无按任务统计</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(r => `<tr>
+    <td>#${r.task_id || '-'} ${esc(r.task_name || '')}</td>
+    <td>${fmtTokens((r.total || {}).total_tokens)}</td>
+    <td>${fmtTokens((r.list_triage || {}).total_tokens)}</td>
+    <td>${fmtTokens((r.analysis || {}).total_tokens)}</td>
+    <td>${fmtUsageCalls(r.total)}</td>
+  </tr>`).join('');
+}
+
+function renderAnalysisUsage(usage) {
+  if (!usage) return;
+  const period = usage.period || {};
+  const total = period.total || {};
+  const byPhase = period.by_phase || {};
+  const today = usage.today || {};
+  const set = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
+  set('aiUsageTotalTokens', fmtTokens(total.total_tokens));
+  set('aiUsageTodayTokens', fmtTokens(today.total_tokens));
+  set('aiUsageApiCalls', fmtUsageCalls(total));
+  renderUsagePhaseBars(byPhase, total.total_tokens);
+  renderUsageInOut(total);
+  renderUsageDaily(usage.daily);
+  renderUsageByTask(usage.by_task);
+}
+
+async function loadAnalysisUsage() {
+  const daysEl = document.getElementById('aiUsageDays');
+  const taskSel = document.getElementById('aiLogTask');
+  const days = daysEl ? daysEl.value : '30';
+  try {
+    const params = new URLSearchParams({ days: String(days) });
+    const taskId = taskSel ? taskSel.value : '';
+    if (taskId) params.set('task_id', taskId);
+    const d = await api('/api/analysis/usage?' + params.toString());
+    renderAnalysisUsage(d.usage);
+  } catch (e) {
+    renderUsageDaily([]);
+    const body = document.getElementById('aiUsageByTask');
+    if (body) body.innerHTML = `<tr><td colspan="5" class="empty">加载失败: ${esc(e.message || '')}</td></tr>`;
+  }
+}
+
+function onAiLogTaskFilterChange() {
+  loadAnalysisUsage();
+  loadAnalysisLogs();
+}
+
 function formatUsageSummary(job) {
   if (!job) return '暂无分析记录';
   const u = job.usage || {};
@@ -549,11 +686,12 @@ async function loadAnalysisLogs() {
     if (summaryEl) summaryEl.textContent = formatUsageSummary(d.latest_job);
     const logs = (d.logs || []).slice().reverse();
     if (!logs.length) {
-      body.innerHTML = '<tr><td colspan="9" class="empty">暂无批次日志</td></tr>';
+      body.innerHTML = '<tr><td colspan="10" class="empty">暂无批次日志</td></tr>';
       return;
     }
     body.innerHTML = logs.map(l => `<tr>
       <td>${fmtTime(l.created_at)}</td>
+      <td>${esc(aiPhaseLabel(l.phase))}</td>
       <td>${l.batch_index || '-'}</td>
       <td>${esc(l.partner_name || '-')}</td>
       <td>${aiLogStatusTag(l.status)}</td>
@@ -570,7 +708,11 @@ async function loadAnalysisLogs() {
 
 function startAiLogPoll() {
   stopAiLogPoll();
-  aiLogTimer = setInterval(loadAnalysisLogs, 4000);
+  loadAnalysisUsage();
+  aiLogTimer = setInterval(function() {
+    loadAnalysisLogs();
+    loadAnalysisUsage();
+  }, 4000);
 }
 
 function stopAiLogPoll() {
@@ -1190,12 +1332,72 @@ function keywordSubtaskStatusTag(st) {
   return '<span class="tag ' + m[0] + '">' + m[1] + '</span>';
 }
 
+function normalizePhaseTiming(pt) {
+  pt = pt || {};
+  const triage = pt.triage_ms || pt.analyze_ms || 0;
+  return {
+    list_crawl_ms: pt.list_crawl_ms || 0,
+    triage_ms: triage,
+    investigation_ms: pt.investigation_ms || 0,
+  };
+}
+
+function sumSourcePhaseTiming(subItems, timing) {
+  let list = 0;
+  let triage = 0;
+  let invest = 0;
+  let hasSub = false;
+  (subItems || []).forEach(function(it) {
+    hasSub = true;
+    const pt = normalizePhaseTiming(it.phase_timing_ms);
+    list += pt.list_crawl_ms;
+    triage += pt.triage_ms;
+    invest += pt.investigation_ms;
+  });
+  const tw = timing || {};
+  if (hasSub) {
+    return {
+      list_crawl_ms: list,
+      triage_ms: triage,
+      investigation_ms: invest,
+      intel_analyze_ms: tw.intel_analyze_ms || 0,
+    };
+  }
+  return {
+    list_crawl_ms: tw.list_crawl_ms || tw.crawl_ms || 0,
+    triage_ms: tw.triage_ms || 0,
+    investigation_ms: tw.investigation_crawl_ms || 0,
+    intel_analyze_ms: tw.intel_analyze_ms || tw.analyze_ms || 0,
+  };
+}
+
+function renderPhaseTimingSummary(timing, subItems) {
+  const t = sumSourcePhaseTiming(subItems, timing);
+  const parts = [
+    '列表爬取 ' + fmtDuration(t.list_crawl_ms),
+    '初筛 ' + fmtDuration(t.triage_ms),
+    '详情勘察 ' + fmtDuration(t.investigation_ms),
+  ];
+  if (t.intel_analyze_ms > 0) {
+    parts.push('情报分析 ' + fmtDuration(t.intel_analyze_ms));
+  }
+  const crawlPhase = t.list_crawl_ms + t.triage_ms + t.investigation_ms;
+  let html = '<p class="meta">Run 累计：' + parts.join(' · ') + '</p>';
+  if (crawlPhase > 0) {
+    html += '<p class="meta muted" style="margin-top:4px;font-size:12px">爬取阶段合计 '
+      + fmtDuration(crawlPhase) + '（与子任务三列相加一致）</p>';
+  }
+  return html;
+}
+
 function subtaskDetailStatusTag(code, label) {
   const map = {
     queued: ['tag-off', label || '排队'],
     list_crawl: ['tag-medium', label || '爬取列表'],
+    triage: ['tag-medium', label || '初筛'],
     investigation: ['tag-medium', label || '勘察详情'],
-    analyze: ['tag-on', label || '分析'],
+    analyze: ['tag-on', label || '初筛'],
+    intel_analyze: ['tag-on', label || '情报分析'],
     done: ['tag-on', label || '完成'],
     failed: ['tag-high', label || '失败'],
     skipped: ['tag-off', label || '已跳过'],
@@ -1206,7 +1408,8 @@ function subtaskDetailStatusTag(code, label) {
 
 function fmtSubtaskPhaseMs(pt, key) {
   if (!pt) return '-';
-  const v = pt[key];
+  const norm = normalizePhaseTiming(pt);
+  const v = norm[key];
   return v > 0 ? fmtDuration(v) : '-';
 }
 
@@ -1226,9 +1429,13 @@ function renderSourceSubtaskItems(items, task, sourceId) {
   const failedIds = items.filter(function(it) {
     return it.detail_status === 'failed' && it.keyword_run_id;
   }).map(function(it) { return it.keyword_run_id; });
+  const showInvCol = sourceId === 'heimao' || items.some(function(x) {
+    return x.stats && x.stats.progress_total;
+  });
   const rows = items.map(function(it) {
-    const pt = it.phase_timing_ms || {};
+    const pt = normalizePhaseTiming(it.phase_timing_ms);
     const listCount = it.stats && it.stats.list_count != null ? it.stats.list_count : '-';
+    const invProg = fmtInvestigationProgress(it);
     const err = it.error_message || '';
     const acct = sourceId === 'xhs' ? fmtXhsAccount(it) : '';
     return '<tr data-subtask-id="' + esc(it.id || '') + '">'
@@ -1236,9 +1443,10 @@ function renderSourceSubtaskItems(items, task, sourceId) {
       + '<td class="truncate">' + esc(it.cohort || '-') + '</td>'
       + (sourceId === 'xhs' ? '<td class="truncate meta" title="' + esc(acct) + '">' + esc(acct) + '</td>' : '')
       + '<td>' + subtaskDetailStatusTag(it.detail_status, it.detail_label) + '</td>'
+      + (showInvCol ? '<td class="phase-ms">' + esc(invProg) + '</td>' : '')
       + '<td class="phase-ms">' + fmtSubtaskPhaseMs(pt, 'list_crawl_ms') + '</td>'
+      + '<td class="phase-ms">' + fmtSubtaskPhaseMs(pt, 'triage_ms') + '</td>'
       + '<td class="phase-ms">' + fmtSubtaskPhaseMs(pt, 'investigation_ms') + '</td>'
-      + '<td class="phase-ms">' + fmtSubtaskPhaseMs(pt, 'analyze_ms') + '</td>'
       + '<td>' + (it.timeout_sec ? (it.timeout_sec + 's') : '-') + '</td>'
       + '<td>' + listCount + '</td>'
       + '<td class="truncate" title="' + esc(err) + '">' + esc(err.slice(0, 40)) + '</td></tr>';
@@ -1254,7 +1462,8 @@ function renderSourceSubtaskItems(items, task, sourceId) {
     + '<th>关键词/子任务</th><th>Cohort</th>'
     + (sourceId === 'xhs' ? '<th>账号</th>' : '')
     + '<th>状态</th>'
-    + '<th>列表爬取</th><th>详情勘察</th><th>分析</th>'
+    + (showInvCol ? '<th>勘察进度</th>' : '')
+    + '<th>列表爬取</th><th>初筛</th><th>详情勘察</th>'
     + '<th>超时</th><th>列表数</th><th>错误</th>'
     + '</tr></thead><tbody class="subtask-items-body" data-source-id="' + esc(sourceId || '') + '">'
     + rows + '</tbody></table>';
@@ -1321,6 +1530,19 @@ function renderSourceKeywordSummary(k) {
     + (k.failed ? ' · 失败 ' + k.failed : '');
 }
 
+function taskRunTooltip(t) {
+  if (t && t.crawl_only) return '仅爬取，不执行 AI 分析';
+  return (t && t.run_block_reason) || '增量爬取+分析';
+}
+
+function runAnalyzeDeferredTag(run) {
+  if (!run || !run.crawl_only) return '';
+  const st = run.stats || {};
+  if (!st.analyze_deferred) return '';
+  const n = st.pending_analyze_raw_count != null ? st.pending_analyze_raw_count : '?';
+  return '<span class="tag tag-pending-analyze" title="待分析 raw 条数">待分析 · ' + n + '</span>';
+}
+
 function phaseLabel(phase) {
   const map = {
     pending: '待执行',
@@ -1333,6 +1555,7 @@ function phaseLabel(phase) {
     list_crawl: '列表爬取',
     crawl: '爬取',
     analyze: 'AI 分析',
+    crawl_done: '爬取完成（待分析）',
   };
   return map[phase] || phase || '—';
 }
@@ -1365,54 +1588,60 @@ function renderSourcePhaseTable(src) {
 }
 
 function renderSourceTimingBlock(src) {
-  const tw = src.timing || {};
   const aw = src.active_work;
   const ps = src.phase_summary || {};
   const subItems = src.subtask_items || [];
-  let subCrawl = 0;
-  let subInvest = 0;
-  let subAnalyze = 0;
-  subItems.forEach(function(it) {
-    const pt = it.phase_timing_ms || {};
-    subCrawl += pt.list_crawl_ms || 0;
-    subInvest += pt.investigation_ms || 0;
-    subAnalyze += pt.analyze_ms || 0;
-  });
-  let html = '';
-  const crawlMs = Math.max(tw.crawl_ms || 0, subCrawl);
-  const investMs = Math.max(tw.investigation_crawl_ms || 0, subInvest);
-  const analyzeMs = Math.max(tw.analyze_ms || 0, subAnalyze);
-  const totalRunMs = crawlMs + investMs + analyzeMs;
-  if (totalRunMs > 0) {
-    html += '<p class="meta">Run 累计：爬取 ' + fmtDuration(crawlMs)
-      + ' · 勘察 ' + fmtDuration(investMs)
-      + ' · 分析 ' + fmtDuration(analyzeMs) + '</p>';
-  } else if (ps.done_total_ms) {
-    html += '<p class="meta">已完成 keyword 合计 ' + fmtDuration(ps.done_total_ms) + '</p>';
+  let html = renderPhaseTimingSummary(src.timing, subItems);
+  if (!html && ps.done_total_ms) {
+    html = '<p class="meta">已完成 keyword 合计 ' + fmtDuration(ps.done_total_ms) + '</p>';
   }
   if (aw) {
     html += '<p class="meta">当前阶段：<strong>' + esc(phaseLabel(aw.phase)) + '</strong>'
       + ' · 已用 ' + fmtDuration(aw.elapsed_ms || 0)
-      + (aw.label ? ' · ' + esc(aw.label) : '') + '</p>';
+      + (aw.progress && aw.progress.total
+        ? ' · 本批 ' + (aw.progress.done || 0) + '/' + aw.progress.total
+          + (aw.progress.investigation_total ? ' · 总 ' + aw.progress.investigation_total + ' 条' : '')
+        : (aw.label ? ' · ' + esc(aw.label) : ''))
+      + '</p>';
   }
   const phaseTable = renderSourcePhaseTable(src);
   if (phaseTable) html += phaseTable;
   return html || '<p class="muted">暂无阶段数据</p>';
 }
 
+function fmtInvestigationProgress(it) {
+  const st = it.stats || {};
+  if (st.progress_total) {
+    return (st.progress_done || 0) + '/' + st.progress_total;
+  }
+  return '-';
+}
+
 function renderCompactSourceProgress(src) {
   const q = src.queue || {};
   const k = src.keywords || {};
+  const inv = src.investigation || {};
   const aw = src.active_work;
   const tw = src.timing || {};
   let prog = '';
   if (k.total) prog += 'kw ' + (k.done || 0) + '/' + k.total;
   if (q.total) prog += (prog ? ' · ' : '') + '队列 ' + (q.done || 0) + '/' + q.total;
+  if (inv.total) {
+    prog += (prog ? ' · ' : '') + '勘察 ' + (inv.finished != null ? inv.finished : ((inv.done || 0) + (inv.failed || 0) + (inv.skipped || 0)))
+      + '/' + inv.total;
+    if (inv.pending) prog += ' (待' + inv.pending + ')';
+  }
   let phaseTxt = '';
   if (aw && aw.phase) {
     phaseTxt = phaseLabel(aw.phase) + ' ' + fmtDuration(aw.elapsed_ms || 0);
+    if (aw.progress && aw.progress.total) {
+      phaseTxt += ' · ' + (aw.progress.done || 0) + '/' + aw.progress.total;
+    } else if (aw.label) {
+      phaseTxt += ' · ' + aw.label;
+    }
   }
-  const runMs = (tw.crawl_ms || 0) + (tw.investigation_crawl_ms || 0) + (tw.analyze_ms || 0);
+  const t = sumSourcePhaseTiming(src.subtask_items, tw);
+  const runMs = t.list_crawl_ms + t.triage_ms + t.investigation_ms + t.intel_analyze_ms;
   return '<div class="task-source-line">'
     + sourceTag(src.source_id) + ' ' + sourceSubtaskStatusTag(src.status)
     + (src.halt ? ' <span class="meta">(' + esc(src.halt === 'pause' ? '暂停' : '终止') + ')</span>' : '')
@@ -1424,10 +1653,19 @@ function renderCompactSourceProgress(src) {
 
 function renderTaskSourceProgress(t) {
   const sources = (t.progress && t.progress.sources) || [];
+  let html = '';
   if (sources.length) {
-    return '<div class="task-source-progress">' + sources.map(renderCompactSourceProgress).join('') + '</div>';
+    html = '<div class="task-source-progress">' + sources.map(renderCompactSourceProgress).join('') + '</div>';
+  } else {
+    html = formatTaskSubtasksLegacy(t);
   }
-  return formatTaskSubtasksLegacy(t);
+  const ad = (t.progress && t.progress.analyze_drain);
+  if (ad && (ad.done || ad.pending_detail != null)) {
+    const total = (ad.done || 0) + (ad.pending_detail || 0);
+    html += '<div class="task-source-line"><span class="meta">AI 分析 ' + (ad.done || 0) + '/' + total
+      + (ad.last_trigger ? (' · ' + esc(ad.last_trigger)) : '') + '</span></div>';
+  }
+  return html;
 }
 
 function formatTaskSubtasksLegacy(t) {
@@ -1454,6 +1692,7 @@ function taskRowSignature(t) {
     sources: prog.sources,
     subtasks: prog.subtasks,
     phase: prog.phase,
+    analyze_drain: prog.analyze_drain,
     last_run: t.last_run ? {
       id: t.last_run.id,
       status: t.last_run.status,
@@ -1480,7 +1719,7 @@ function buildTaskActionsHtml(t) {
   return (t.can_pause ? '<button class="btn btn-orange btn-sm" onclick="pauseTaskById(' + t.id + ')">暂停</button>' : '')
     + (t.can_stop ? '<button class="btn btn-red btn-sm" onclick="stopTaskById(' + t.id + ',\'all\')">终止任务</button>' : '')
     + (t.can_resume ? '<button class="btn btn-primary btn-sm" onclick="resumeTaskById(' + t.id + ')">继续</button>' : '')
-    + '<button class="btn btn-primary btn-sm" onclick="runTaskById(' + t.id + ')" ' + (!t.can_run ? 'disabled' : '') + ' title="' + esc(t.run_block_reason || '增量爬取+分析') + '">执行</button>'
+    + '<button class="btn btn-primary btn-sm" onclick="runTaskById(' + t.id + ')" ' + (!t.can_run ? 'disabled' : '') + ' title="' + esc(taskRunTooltip(t)) + '">执行</button>'
     + '<button class="btn btn-gray btn-sm" onclick="openTaskDetail(' + t.id + ')">详情</button>'
     + '<button class="btn btn-gray btn-sm" onclick="deleteTask(' + t.id + ')" '
     + (['crawling', 'analyzing'].includes(t.status) ? 'disabled' : '') + '>删除</button>';
@@ -1548,7 +1787,7 @@ function normalizeLegacyKeywordItems(keywords) {
       detail_status: code,
       detail_label: labels[code],
       elapsed_ms: 0,
-      phase_timing_ms: { list_crawl_ms: 0, analyze_ms: 0, investigation_ms: 0 },
+      phase_timing_ms: { list_crawl_ms: 0, triage_ms: 0, investigation_ms: 0 },
       timeout_sec: k.timeout_sec,
       stats: k.stats,
       error_message: k.error_message,
@@ -1642,7 +1881,8 @@ function buildRunDetailHtml(run, task, keywords) {
   const totalMs = (run.crawl_duration_ms || 0) + (run.analyze_duration_ms || 0);
   let html = '<div class="run-detail-drawer">';
   html += '<div class="run-detail-overview">'
-    + '<div class="run-detail-kv"><span class="k">' + esc(runFieldLabel('status')) + '</span><span class="v">' + statusTag(run.status) + '</span></div>'
+    + '<div class="run-detail-kv"><span class="k">' + esc(runFieldLabel('status')) + '</span><span class="v">' + statusTag(run.status) + ' ' + runAnalyzeDeferredTag(run) + '</span></div>'
+    + '<div class="run-detail-kv"><span class="k">执行模式</span><span class="v">' + (run.crawl_only ? '仅爬取' : '爬取+分析') + '</span></div>'
     + '<div class="run-detail-kv"><span class="k">' + esc(runFieldLabel('trigger')) + '</span><span class="v">' + esc(runTriggerLabel(run.trigger)) + '</span></div>'
     + '<div class="run-detail-kv"><span class="k">' + esc(runFieldLabel('analyze_mode')) + '</span><span class="v">' + esc(runModeLabel(run.analyze_mode)) + '</span></div>'
     + '<div class="run-detail-kv"><span class="k">总耗时</span><span class="v">' + fmtDuration(totalMs) + '</span></div>'
@@ -1655,6 +1895,14 @@ function buildRunDetailHtml(run, task, keywords) {
     + '</div>';
   if (run.error_message) {
     html += renderRunDetailError(run.error_message);
+  }
+  if (run.crawl_only && (run.stats || {}).analyze_deferred && task && task.id) {
+    html += '<div class="run-detail-deferred-analyze">'
+      + '<p class="muted">本次 Run 已跳过 AI 分析，共 '
+      + ((run.stats || {}).pending_analyze_raw_count != null ? run.stats.pending_analyze_raw_count : '?')
+      + ' 条 raw 待处理。</p>'
+      + '<button type="button" class="btn btn-orange btn-sm" onclick="reanalyzeIncremental(' + task.id + ')">增量 AI</button>'
+      + '</div>';
   }
   html += '<h4 class="run-detail-section">统计指标</h4>' + renderRunDetailStats(run.stats);
   html += '<h4 class="run-detail-section">分源耗时</h4>' + renderRunDetailTiming(run.timing_by_source);
@@ -1724,17 +1972,18 @@ function renderRunDetailTiming(timing) {
   if (!ids.length) return '<p class="muted">无分源数据</p>';
   const rows = ids.map(function(sid) {
     const t = timing[sid] || {};
+    const listMs = t.list_crawl_ms || t.crawl_ms || 0;
     return '<tr><td>' + sourceTag(sid) + '</td>'
-      + '<td>' + fmtDuration(t.crawl_ms) + '</td>'
+      + '<td>' + fmtDuration(listMs) + '</td>'
+      + '<td>' + fmtDuration(t.triage_ms || 0) + '</td>'
       + '<td>' + fmtDuration(t.investigation_crawl_ms || 0) + '</td>'
-      + '<td>' + fmtDuration(t.analyze_ms) + '</td>'
+      + '<td>' + fmtDuration(t.intel_analyze_ms || t.analyze_ms || 0) + '</td>'
       + '<td>' + (t.raw_new || 0) + '</td>'
       + '<td>' + (t.raw_updated || 0) + '</td>'
       + '<td>' + (t.intel_written || 0) + '</td></tr>';
   }).join('');
   return '<table class="run-detail-table"><thead><tr>'
-    + '<th>来源</th><th>' + esc(runFieldMeta('crawl_ms').label) + '</th>'
-    + '<th>勘察</th><th>' + esc(runFieldMeta('analyze_ms').label) + '</th>'
+    + '<th>来源</th><th>列表爬取</th><th>初筛</th><th>详情勘察</th><th>情报分析</th>'
     + '<th>' + esc(runFieldMeta('raw_new').label) + '</th>'
     + '<th>' + esc(runFieldMeta('raw_updated').label) + '</th>'
     + '<th>' + esc(runFieldMeta('intel_written').label) + '</th>'
@@ -1788,7 +2037,7 @@ function renderRunSummaryRow(r, taskId) {
     + '<td>' + fmtTime(r.started_at) + '</td>'
     + '<td>' + esc(runTriggerLabel(r.trigger)) + '</td>'
     + '<td>' + esc(runModeLabel(r.analyze_mode)) + '</td>'
-    + '<td>' + statusTag(r.status) + '</td>'
+    + '<td>' + statusTag(r.status) + ' ' + runAnalyzeDeferredTag(r) + '</td>'
     + '<td>' + fmtDuration(total) + '</td>'
     + renderRunHistoryStatCells(st)
     + '</tr>';
@@ -1896,12 +2145,12 @@ function renderTaskDetailActionBar() {
   const runGroup = ''
     + (t.can_resume ? '<button type="button" class="btn btn-primary btn-sm" onclick="resumeTaskById(' + t.id + ')" title="继续未完成子任务">继续 (' + (t.incomplete_subtasks || 0) + ')</button>' : '')
     + '<button type="button" class="btn btn-primary btn-sm" onclick="runTaskById(' + t.id + ')" '
-    + (!t.can_run ? 'disabled' : '') + ' title="' + esc(t.run_block_reason || '增量爬取+分析') + '">执行</button>';
+    + (!t.can_run ? 'disabled' : '') + ' title="' + esc(taskRunTooltip(t)) + '">执行</button>';
   const manageGroup = ''
     + '<button type="button" class="btn btn-orange btn-sm" onclick="reanalyzeIncremental(' + t.id + ')" '
-    + (!t.can_reanalyze ? 'disabled' : '') + '>增量 AI</button>'
+    + (!t.can_reanalyze ? 'disabled title="' + esc(t.reanalyze_block_reason || '不可增量 AI') + '"' : '') + '>增量 AI</button>'
     + '<button type="button" class="btn btn-orange btn-sm" onclick="reanalyzeFull(' + t.id + ')" '
-    + (!t.can_reanalyze ? 'disabled' : '') + '>全量 AI</button>'
+    + (!t.can_reanalyze_full ? 'disabled title="' + esc(t.reanalyze_full_block_reason || t.reanalyze_block_reason || '不可全量 AI') + '"' : '') + '>全量 AI</button>'
     + '<button type="button" class="btn btn-gray btn-sm" onclick="editTask(' + t.id + ')" '
     + (running ? 'disabled' : '') + '>编辑</button>'
     + '<button type="button" class="btn btn-gray btn-sm admin-only-save" onclick="openPurgeModal({taskId:' + t.id + '})">清理</button>'
@@ -1929,6 +2178,14 @@ function renderTaskDetailProgressHero(t) {
     if (prog.subtasks.running) extras.push('运行 ' + prog.subtasks.running);
   }
   if (prog.current_keyword) extras.push('当前 ' + prog.current_keyword);
+  const ad = prog.analyze_drain;
+  if (ad && (ad.done || ad.pending_detail != null)) {
+    const total = (ad.done || 0) + (ad.pending_detail || 0);
+    extras.push('AI ' + (ad.done || 0) + '/' + total + (ad.last_trigger ? (' · ' + ad.last_trigger) : ''));
+  }
+  if (t.status === 'crawling' && ad && (ad.done || 0) > 0) {
+    extras.push('爬取+分析中');
+  }
   return '<div class="task-detail-progress-hero">'
     + '<span class="hero-label">执行进度</span>'
     + '<span class="hero-phase">' + esc(phaseLabel(prog.phase || 'pending')) + '</span>'
@@ -1963,18 +2220,7 @@ function renderTaskSourceProgressCard(src) {
   const statusClass = src.status === 'failed' ? 'is-failed'
     : (src.status === 'running' ? 'is-running' : (src.status === 'done' ? 'is-done' : ''));
   const subItems = src.subtask_items || [];
-  let subCrawl = 0;
-  let subInvest = 0;
-  let subAnalyze = 0;
-  subItems.forEach(function(it) {
-    const pt = it.phase_timing_ms || {};
-    subCrawl += pt.list_crawl_ms || 0;
-    subInvest += pt.investigation_ms || 0;
-    subAnalyze += pt.analyze_ms || 0;
-  });
-  const crawlMs = Math.max(tw.crawl_ms || 0, subCrawl);
-  const investMs = Math.max(tw.investigation_crawl_ms || 0, subInvest);
-  const analyzeMs = Math.max(tw.analyze_ms || 0, subAnalyze);
+  const t = sumSourcePhaseTiming(subItems, tw);
   let metrics = [];
   if (q.total) metrics.push('<span>队列 <strong>' + (q.done || 0) + '/' + q.total + '</strong></span>');
   if (q.failed) metrics.push('<span>失败 <strong>' + q.failed + '</strong></span>');
@@ -1983,12 +2229,15 @@ function renderTaskSourceProgressCard(src) {
     metrics.push('<span>' + esc(src.halt === 'pause' ? '已请求暂停' : '已请求终止') + '</span>');
   }
   let timingHtml = '';
-  if (crawlMs || investMs || analyzeMs) {
+  const crawlPhase = t.list_crawl_ms + t.triage_ms + t.investigation_ms;
+  if (crawlPhase || t.intel_analyze_ms) {
     timingHtml = '<div class="task-source-card-timing">'
       + '<div class="timing-row"><span class="timing-label">累计</span>'
-      + '<span>爬取 ' + fmtDuration(crawlMs) + '</span>'
-      + '<span>勘察 ' + fmtDuration(investMs) + '</span>'
-      + '<span>分析 ' + fmtDuration(analyzeMs) + '</span></div>';
+      + '<span>列表 ' + fmtDuration(t.list_crawl_ms) + '</span>'
+      + '<span>初筛 ' + fmtDuration(t.triage_ms) + '</span>'
+      + '<span>勘察 ' + fmtDuration(t.investigation_ms) + '</span>'
+      + (t.intel_analyze_ms ? ('<span>情报分析 ' + fmtDuration(t.intel_analyze_ms) + '</span>') : '')
+      + '</div>';
     if (aw && aw.phase) {
       timingHtml += '<div class="timing-row"><span class="timing-label">当前</span>'
         + '<span><strong>' + esc(phaseLabel(aw.phase)) + '</strong>'
@@ -2733,6 +2982,7 @@ function buildTaskPayload(existingTask) {
     max_pages: parseInt(document.getElementById('tPages').value, 10) || 2,
     crawl_mode: document.getElementById('tCrawlMode').value || 'list_first',
     fetch_detail: document.getElementById('tFetchDetail').checked,
+    crawl_only: !!(document.getElementById('tCrawlOnly') && document.getElementById('tCrawlOnly').checked),
     schedule,
     business_spec: prevBs,
   };
@@ -2746,8 +2996,10 @@ function formatLastRun(t) {
   const lr = t.last_run;
   if (!lr) return '<span class="muted">—</span>';
   const total = (lr.crawl_duration_ms || 0) + (lr.analyze_duration_ms || 0);
+  const deferred = lr.crawl_only && (lr.stats || {}).analyze_deferred
+    ? ' · <span class="tag tag-pending-analyze">待分析</span>' : '';
   const sched = t.schedule && t.schedule.enabled ? '<br><span class="meta">定时' + (t.next_run_at ? ' · 下次 ' + fmtTime(t.next_run_at) : '') + '</span>' : '';
-  return fmtTime(lr.finished_at || lr.started_at) + '<br><span class="meta">' + (lr.trigger || '') + ' · ' + fmtDuration(total) + ' · ' + (lr.status || '') + '</span>' + sched;
+  return fmtTime(lr.finished_at || lr.started_at) + deferred + '<br><span class="meta">' + (lr.trigger || '') + ' · ' + fmtDuration(total) + ' · ' + (lr.status || '') + '</span>' + sched;
 }
 
 let taskPollTimer = null;
@@ -2815,6 +3067,8 @@ function resetTaskForm() {
   document.getElementById('tPages').value = '2';
   document.getElementById('tCrawlMode').value = 'list_first';
   document.getElementById('tFetchDetail').checked = false;
+  const crawlOnlyEl = document.getElementById('tCrawlOnly');
+  if (crawlOnlyEl) crawlOnlyEl.checked = false;
   const ign = document.getElementById('tIgnoreBefore');
   if (ign) ign.value = '';
   renderPartnerChecks([]);
@@ -2828,6 +3082,8 @@ function fillTaskForm(t) {
   document.getElementById('tPages').value = t.max_pages || 2;
   document.getElementById('tCrawlMode').value = t.crawl_mode || 'list_first';
   document.getElementById('tFetchDetail').checked = !!t.fetch_detail;
+  const crawlOnlyEl = document.getElementById('tCrawlOnly');
+  if (crawlOnlyEl) crawlOnlyEl.checked = !!t.crawl_only;
   const ign = document.getElementById('tIgnoreBefore');
   if (ign) {
     const bs = t.business_spec || {};
@@ -2921,15 +3177,22 @@ async function deleteTask(id) {
 }
 
 async function runTaskById(task_id) {
+  const t = tasks.find(function(x) { return x.id === task_id; });
+  const crawl_only = t ? !!t.crawl_only : false;
   let d;
   try {
-    d = await api('/api/monitor/run', { method: 'POST', body: JSON.stringify({ task_id, analyze_mode: 'incremental' }) });
+    d = await api('/api/monitor/run', {
+      method: 'POST',
+      body: JSON.stringify({ task_id, analyze_mode: 'incremental', crawl_only: crawl_only }),
+    });
   } catch (e) {
     toastMsg(e.message || '启动失败', true);
     return;
   }
   if (!d.ok) { toastMsg(d.msg || '启动失败', true); return; }
-  document.getElementById('taskStatus').textContent = '任务 #' + task_id + ' 增量执行已启动…';
+  document.getElementById('taskStatus').textContent = crawl_only
+    ? ('任务 #' + task_id + ' 仅爬取已启动…')
+    : ('任务 #' + task_id + ' 增量执行已启动…');
   pollTask(task_id);
 }
 
@@ -3054,10 +3317,12 @@ function viewTaskIntel(task_id) {
 }
 
 function onIntelFilterChange() {
+  intelListPage = 1;
   lastTaskId = parseInt(document.getElementById('fTask').value, 10) || null;
   App.setQuery({
     tab: 'intel',
     intel_id: null,
+    intel_page: 1,
     task_id: document.getElementById('fTask').value || null,
     partner_id: document.getElementById('fPartner').value || null,
     source: document.getElementById('fSource').value || null,
@@ -3143,7 +3408,8 @@ async function pollTask(id) {
 
 async function loadRecords() {
   const params = intelFilterParams();
-  params.set('page_size', '100');
+  params.set('page', String(intelListPage));
+  params.set('page_size', String(intelListPageSize));
   let d;
   try {
     d = await api('/api/intel/records?' + params.toString());
@@ -3152,16 +3418,37 @@ async function loadRecords() {
     return;
   }
   const rows = d.records || [];
+  const total = d.total != null ? d.total : rows.length;
+  const page = d.page || intelListPage;
+  const pageSize = d.page_size || intelListPageSize;
+  intelListPage = page;
+  intelListPageSize = clampListPageSize(pageSize);
   const applied = d.applied_filters || {};
   const sentimentFilter = document.getElementById('fSentiment') && document.getElementById('fSentiment').value;
   if (sentimentFilter && rows.length && rows.some(function(r) { return r.sentiment_label !== sentimentFilter; })) {
     toastMsg('情感筛选未在后端生效，请重启 crawler_web.py', true);
   }
-  const countBits = ['共 ' + (d.total || rows.length) + ' 条'];
+  const countBits = [formatListCountMeta(total, page, pageSize)];
   if (applied.sentiment_label) countBits.push(sentimentLabelText(applied.sentiment_label));
   if (applied.sentiment_score_min != null) countBits.push('分数≥' + applied.sentiment_score_min);
   if (applied.sentiment_score_max != null) countBits.push('分数≤' + applied.sentiment_score_max);
   document.getElementById('recordCount').textContent = '(' + countBits.join(' · ') + ')';
+  renderListPagination('intelListPagination', {
+    page: page,
+    pageSize: intelListPageSize,
+    total: total,
+    onPageChange: function(p) {
+      intelListPage = p;
+      App.setQuery({ intel_page: p, intel_page_size: intelListPageSize }, true);
+      loadRecords();
+    },
+    onPageSizeChange: function(s) {
+      intelListPageSize = s;
+      intelListPage = 1;
+      App.setQuery({ intel_page: 1, intel_page_size: s }, true);
+      loadRecords();
+    },
+  });
   const body = document.getElementById('recordBody');
   if (!rows.length) {
     body.innerHTML = '<tr><td colspan="10" class="empty">暂无数据</td></tr>';
@@ -3253,8 +3540,15 @@ function fillAnalysisForm(analysis, status, activePromptBody) {
   set('aiModel', ai.model || '');
   set('aiPromptVer', ai.prompt_version || '');
   set('aiKeyEnv', ai.api_key_env || 'MINIMAX_API_KEY');
-  set('aiBatch', ai.batch_size != null ? ai.batch_size : 10);
+  set('aiBatch', ai.batch_size != null ? ai.batch_size : 12);
+  set('aiParallelBatches', ai.parallel_batches != null ? ai.parallel_batches : 5);
   set('aiBodyMax', ai.max_body_chars != null ? ai.max_body_chars : 2000);
+  const lt = ai.list_triage || {};
+  window._analysisListTriage = lt;
+  set('aiTriageBatch', lt.batch_size != null ? lt.batch_size : 30);
+  set('aiTriageBodyMax', lt.max_body_chars != null ? lt.max_body_chars : 400);
+  const triageEn = document.getElementById('aiTriageEnabled');
+  if (triageEn) triageEn.checked = lt.enabled !== false;
   set('aiRetries', ai.max_retries != null ? ai.max_retries : 2);
   set('aiRetryDelay', ai.retry_delay_sec != null ? ai.retry_delay_sec : 2);
   set('aiTemp', ai.temperature != null ? ai.temperature : 0.3);
@@ -3330,7 +3624,8 @@ async function saveAnalysisConfig() {
     model: document.getElementById('aiModel').value.trim(),
     prompt_version: document.getElementById('aiPromptVer').value.trim(),
     api_key_env: document.getElementById('aiKeyEnv').value.trim() || 'MINIMAX_API_KEY',
-    batch_size: parseInt(document.getElementById('aiBatch').value, 10) || 10,
+    batch_size: parseInt(document.getElementById('aiBatch').value, 10) || 12,
+    parallel_batches: parseInt(document.getElementById('aiParallelBatches').value, 10) || 5,
     max_body_chars: parseInt(document.getElementById('aiBodyMax').value, 10) || 2000,
     max_retries: parseInt(document.getElementById('aiRetries').value, 10) || 2,
     retry_delay_sec: parseFloat(document.getElementById('aiRetryDelay').value) || 2,
@@ -3339,6 +3634,13 @@ async function saveAnalysisConfig() {
     mock_without_key: document.getElementById('aiMock').checked,
     mock_default_relevance: document.getElementById('aiMockRel').value,
   };
+  const ltBase = window._analysisListTriage || {};
+  const triageEnEl = document.getElementById('aiTriageEnabled');
+  payload.list_triage = Object.assign({}, ltBase, {
+    batch_size: parseInt(document.getElementById('aiTriageBatch').value, 10) || 30,
+    max_body_chars: parseInt(document.getElementById('aiTriageBodyMax').value, 10) || 400,
+    enabled: triageEnEl ? triageEnEl.checked : ltBase.enabled !== false,
+  });
   if (extraBody !== undefined) payload.extra_body = extraBody;
   const key = document.getElementById('aiKey').value.trim();
   if (key) payload.api_key = key;

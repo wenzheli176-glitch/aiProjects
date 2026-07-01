@@ -12,6 +12,7 @@ from intel.db import (
     update_investigation_status,
 )
 from intel.matcher import match_all_partners, partner_search_keywords
+from intel.ignore_before import resolve_ignore_before, should_skip_ignore_before
 from intel.registry import registry
 
 _RELEVANCE_RANK = {'high': 3, 'medium': 2, 'low': 1, 'noise': 0}
@@ -76,6 +77,16 @@ def row_needs_investigation(row, partners, business_spec=None, task=None):
     if not triage.get('triage_relevance'):
         return False
 
+    try:
+        normalizer = registry.get_normalizer(row['source'])
+        normalized = normalizer.normalize(row.get('payload') or {})
+    except KeyError:
+        normalized = {'title': '', 'body': '', 'published_at': ''}
+
+    ignore_before = resolve_ignore_before(task=task, business_spec=business_spec)
+    if should_skip_ignore_before(normalized.get('published_at'), ignore_before):
+        return False
+
     min_rel, min_risk = _threshold()
     if business_spec.get('min_triage_relevance'):
         min_rel = business_spec['min_triage_relevance']
@@ -83,13 +94,6 @@ def row_needs_investigation(row, partners, business_spec=None, task=None):
     p0s = _p0_partners(partners)
     if force_ids:
         p0s = [p for p in partners if p['id'] in force_ids] or p0s
-
-    try:
-        from intel.registry import registry
-        normalizer = registry.get_normalizer(row['source'])
-        normalized = normalizer.normalize(row['payload'])
-    except KeyError:
-        normalized = {'title': '', 'body': ''}
 
     p0_hit = _force_p0_investigation(normalized, p0s)
     force = bool(force_ids and match_all_partners(
@@ -122,6 +126,7 @@ def _xhs_uses_keyword_pipeline(task=None):
 
 def build_investigation_queue(task_id, partners, business_spec=None, log_fn=None, task=None):
     business_spec = business_spec or {}
+    ignore_before = resolve_ignore_before(task=task, business_spec=business_spec)
     min_rel, min_risk = _threshold()
     if business_spec.get('min_triage_relevance'):
         min_rel = business_spec['min_triage_relevance']
@@ -135,6 +140,7 @@ def build_investigation_queue(task_id, partners, business_spec=None, log_fn=None
     analysis_state = get_raw_analysis_state(task_id)
     raw_rows = list_raw_records(task_id)
     queued = 0
+    skipped_ignore = 0
 
     for row in raw_rows:
         if row.get('crawl_phase') == 'detail':
@@ -149,7 +155,11 @@ def build_investigation_queue(task_id, partners, business_spec=None, log_fn=None
             normalizer = registry.get_normalizer(row['source'])
             normalized = normalizer.normalize(row['payload'])
         except KeyError:
-            normalized = {'title': '', 'body': ''}
+            normalized = {'title': '', 'body': '', 'published_at': ''}
+
+        if should_skip_ignore_before(normalized.get('published_at'), ignore_before):
+            skipped_ignore += 1
+            continue
 
         p0_hit = _force_p0_investigation(normalized, p0s)
         force = bool(force_ids and match_all_partners(normalized, [p for p in partners if p['id'] in force_ids]))
@@ -174,6 +184,8 @@ def build_investigation_queue(task_id, partners, business_spec=None, log_fn=None
         queued += 1
 
     if log_fn:
+        if skipped_ignore:
+            log_fn('[investigation] 忽略早于 %s 跳过 %d 条' % (ignore_before, skipped_ignore))
         log_fn('[investigation] 队列 %d 条' % queued)
     return queued
 
@@ -198,12 +210,43 @@ def skip_investigation_batch_for_quota(run_id, batch_items, run_metrics=None):
     return n
 
 
-def process_investigation_batch(source_id, batch_items, task, crawl_ctx, run_metrics=None):
+def process_investigation_batch(source_id, batch_items, task, crawl_ctx, run_metrics=None, work_item_id=None):
     """执行单源 investigation 批次（Worker 与单进程共用）。"""
     import time
 
     if not batch_items:
         return {'done': 0, 'failed': 0, 'skipped': 0}
+
+    log_fn = (crawl_ctx or {}).get('log')
+    task_id = task.get('id') if isinstance(task, dict) else None
+    run_id = (crawl_ctx or {}).get('run_id')
+    progress_state = {'last_sync': 0.0}
+
+    def _report_progress(done_in_batch, total_in_batch):
+        if work_item_id:
+            from intel.crawl_queue import update_work_item_progress
+            update_work_item_progress(work_item_id, {
+                'progress_done': int(done_in_batch),
+                'progress_total': int(total_in_batch),
+            })
+        if not task_id or not run_id:
+            return
+        now = time.monotonic()
+        if done_in_batch != total_in_batch and done_in_batch % 5 != 0 and (now - progress_state['last_sync']) < 2:
+            return
+        progress_state['last_sync'] = now
+        from intel.db import sync_task_subtask_progress
+        sync_task_subtask_progress(task_id, run_id)
+        if log_fn and total_in_batch:
+            from intel.db import investigation_queue_counts
+            inv = investigation_queue_counts(task_id, source_id=source_id)
+            log_fn('[investigation] %s 本批 %d/%d · 累计 %d/%d' % (
+                source_id,
+                done_in_batch,
+                total_in_batch,
+                inv.get('finished', 0),
+                inv.get('total', 0),
+            ))
 
     if source_id == 'xhs' and _xhs_uses_keyword_pipeline(task):
         n = 0
@@ -247,8 +290,11 @@ def process_investigation_batch(source_id, batch_items, task, crawl_ctx, run_met
                 for it in batch_items
             ],
         }
+    elif source_id == 'heimao':
+        options['on_progress'] = lambda done, total, _url: _report_progress(done, total)
 
     t0 = time.monotonic()
+    _report_progress(0, len(batch_items))
     results = crawler.crawl_investigation(crawl_ctx, task, urls, options)
     crawl_ms = int((time.monotonic() - t0) * 1000)
     if run_metrics:
@@ -282,7 +328,18 @@ def process_investigation_batch(source_id, batch_items, task, crawl_ctx, run_met
     if run_id and source_id == 'xhs':
         from intel.modal_quota import sync_modal_quota_to_run_metrics
         sync_modal_quota_to_run_metrics(run_id, run_metrics)
+    _report_progress(len(batch_items), len(batch_items))
+    if task_id and run_id:
+        from intel.analyze_drain import maybe_batch_drain_analyze
+        maybe_batch_drain_analyze(
+            task_id, run_id, task=task, run_metrics=run_metrics, log_fn=log_fn,
+        )
     return {'done': done, 'failed': failed, 'skipped': skipped}
+
+
+def _investigation_batch_size():
+    from intel.crawl_queue import _investigation_batch_size as _size
+    return _size()
 
 
 def sync_investigation_run_metrics(task_id, run_metrics, run_id=None):
@@ -316,28 +373,46 @@ def run_investigation_crawl(task_id, crawl_ctx, task, run_metrics=None, log_fn=N
     for item in queue:
         by_source.setdefault(item['source'], []).append(item)
 
+    batch_size = _investigation_batch_size()
     done = 0
     failed = 0
     raw_by_id = {r['id']: r for r in list_raw_records(task_id)}
     for source_id, items in by_source.items():
-        if timeout_check and timeout_check():
-            break
-        batch_items = [{
-            'queue_id': it['id'],
-            'raw_id': it.get('raw_id'),
-            'url': it.get('url') or '',
-            'keyword': '',
-        } for it in items]
-        if source_id == 'xhs':
-            for bi in batch_items:
-                raw = raw_by_id.get(bi.get('raw_id')) or {}
-                payload = raw.get('payload') or {}
-                bi['keyword'] = (payload.get('_search_keyword') or raw.get('keyword') or '').strip()
-        result = process_investigation_batch(
-            source_id, batch_items, task, crawl_ctx, run_metrics=run_metrics,
-        )
-        done += result.get('done', 0)
-        failed += result.get('failed', 0)
+        inv_total = len(items)
+        batch_total = (inv_total + batch_size - 1) // batch_size if inv_total else 0
+        for bi in range(batch_total):
+            if timeout_check and timeout_check():
+                break
+            chunk = items[bi * batch_size:(bi + 1) * batch_size]
+            batch_items = [{
+                'queue_id': it['id'],
+                'raw_id': it.get('raw_id'),
+                'url': it.get('url') or '',
+                'keyword': '',
+            } for it in chunk]
+            if source_id == 'xhs':
+                for bi_item in batch_items:
+                    raw = raw_by_id.get(bi_item.get('raw_id')) or {}
+                    payload = raw.get('payload') or {}
+                    bi_item['keyword'] = (payload.get('_search_keyword') or raw.get('keyword') or '').strip()
+            if log_fn:
+                log_fn('[investigation] %s 批次 %d/%d · %d 条' % (
+                    source_id, bi + 1, batch_total, len(batch_items),
+                ))
+            result = process_investigation_batch(
+                source_id, batch_items, task, crawl_ctx, run_metrics=run_metrics,
+            )
+            done += result.get('done', 0)
+            failed += result.get('failed', 0)
+            run_id = (crawl_ctx or {}).get('run_id')
+            if run_id:
+                from intel.db import sync_task_subtask_progress
+                sync_task_subtask_progress(task_id, run_id)
+                from intel.analyze_drain import maybe_batch_drain_analyze
+                maybe_batch_drain_analyze(
+                    task_id, run_id, task=task, run_metrics=run_metrics, log_fn=log_fn,
+                    timeout_check=timeout_check,
+                )
 
     run_id = (crawl_ctx or {}).get('run_id')
     if run_id:

@@ -5,9 +5,11 @@
 def _empty_source_bucket():
     return {
         'crawl_ms': 0,
+        'list_crawl_ms': 0,
         'investigation_crawl_ms': 0,
-        'analyze_ms': 0,
         'triage_ms': 0,
+        'intel_analyze_ms': 0,
+        'analyze_ms': 0,
         'raw_new': 0,
         'raw_updated': 0,
         'intel_written': 0,
@@ -39,6 +41,7 @@ class RunMetrics:
             'sources_degraded': 0,
             'heimao_skipped_empty': 0,
             'intel_skipped_ignore_before': 0,
+            'raw_skipped_ignore_before': 0,
         }
         self.worker_instances = []
         self.timing_by_source = {}
@@ -111,6 +114,9 @@ class RunMetrics:
 
     def record_intel_skipped_ignore_before(self, count=1):
         self.stats['intel_skipped_ignore_before'] += int(count)
+
+    def record_raw_skipped_ignore_before(self, count=1):
+        self.stats['raw_skipped_ignore_before'] += int(count)
         self.stats['intel_skipped'] += int(count)
 
     def record_heimao_skipped_empty(self, count=1):
@@ -148,7 +154,7 @@ class RunMetrics:
             share = cnt / total_items
             source = self._src(source)
             ams = int(analyze_ms * share)
-            self.timing_by_source[source]['analyze_ms'] += ams
+            self.timing_by_source[source]['intel_analyze_ms'] += ams
             ppt = int(pt * share)
             cct = int(ct * share)
             ttt = int(tt * share)

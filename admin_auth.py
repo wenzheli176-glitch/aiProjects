@@ -109,10 +109,15 @@ def require_admin(fn):
     def wrapper(*args, **kwargs):
         if not admin_auth_enabled():
             return fn(*args, **kwargs)
-        if not is_admin_request():
-            return jsonify({'ok': False, 'msg': '需要管理员登录'}), 403
-        return fn(*args, **kwargs)
-
+        if is_admin_request():
+            return fn(*args, **kwargs)
+        try:
+            from api_auth import api_auth_enabled, has_valid_api_key
+            if api_auth_enabled() and has_valid_api_key():
+                return fn(*args, **kwargs)
+        except ImportError:
+            pass
+        return jsonify({'ok': False, 'msg': '需要管理员登录'}), 403
     return wrapper
 
 

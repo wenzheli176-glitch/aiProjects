@@ -104,6 +104,7 @@
             <tbody id="recordBody"><tr><td colspan="10" class="empty">暂无数据</td></tr></tbody>
           </table>
         </div>
+        <div id="intelListPagination" class="list-pagination"></div>
       </div>
     </div>
     <div id="intelDetailView" style="display:none">
@@ -113,9 +114,9 @@
     <div id="panel-raw" class="app-panel">
       <div id="rawListView">
         <div class="filter-bar filters">
-          <div class="field"><label>监测任务</label><select id="frTask" onchange="loadRawRecords()"><option value="">全部</option></select></div>
-          <div class="field"><label>合作方</label><select id="frPartner" onchange="loadRawRecords()"><option value="">全部</option></select></div>
-          <div class="field"><label>来源</label><select id="frSource" onchange="loadRawRecords()"><option value="">全部</option></select></div>
+          <div class="field"><label>监测任务</label><select id="frTask" onchange="onRawFilterChange()"><option value="">全部</option></select></div>
+          <div class="field"><label>合作方</label><select id="frPartner" onchange="onRawFilterChange()"><option value="">全部</option></select></div>
+          <div class="field"><label>来源</label><select id="frSource" onchange="onRawFilterChange()"><option value="">全部</option></select></div>
           <div class="btn-group" style="margin:0">
             <button class="btn btn-primary btn-sm" onclick="loadRawRecords()">刷新</button>
             <button class="btn btn-gray btn-sm" onclick="exportRaw('json')">导出 JSON</button>
@@ -128,6 +129,7 @@
             <table><thead><tr><th>ID</th><th>任务</th><th>合作方</th><th>来源</th><th>关键词</th><th>摘要</th><th data-field-key="published_at">发布时间</th><th>采集</th><th>更新</th><th>分析</th></tr></thead>
             <tbody id="rawTableBody"><tr><td colspan="10" class="empty">加载中…</td></tr></tbody></table>
           </div>
+          <div id="rawListPagination" class="list-pagination"></div>
         </div>
       </div>
       <div id="rawDetailView" style="display:none"><div id="rawDetailContent"></div></div>
@@ -312,8 +314,11 @@
         <div class="field"><label>模型名称</label><input id="aiModel" type="text"></div>
         <div class="field"><label>环境变量名</label><input id="aiKeyEnv" type="text"></div>
         <div class="field" style="grid-column:1/-1"><label>API Key（可选，内网可直填）</label><input id="aiKey" type="password" autocomplete="off" placeholder="留空则读环境变量"></div>
-        <div class="field"><label>批大小</label><input id="aiBatch" type="number" min="1"></div>
-        <div class="field"><label>正文最大字符</label><input id="aiBodyMax" type="number" min="100"></div>
+        <div class="field"><label data-field-key="batch_size">分析批大小</label><input id="aiBatch" type="number" min="1" max="50"></div>
+        <div class="field"><label data-field-key="parallel_batches">并行批数</label><input id="aiParallelBatches" type="number" min="1" max="20"></div>
+        <div class="field"><label data-field-key="max_body_chars">正文最大字符</label><input id="aiBodyMax" type="number" min="100"></div>
+        <div class="field"><label data-field-key="list_triage.batch_size">初筛批大小</label><input id="aiTriageBatch" type="number" min="1" max="100"></div>
+        <div class="field"><label data-field-key="list_triage.max_body_chars">初筛正文最大字符</label><input id="aiTriageBodyMax" type="number" min="100" max="2000"></div>
         <div class="field"><label>失败重试次数</label><input id="aiRetries" type="number" min="0"></div>
         <div class="field"><label>重试间隔（秒）</label><input id="aiRetryDelay" type="number" step="0.5" min="0"></div>
         <div class="field"><label>Temperature</label><input id="aiTemp" type="number" step="0.1" min="0" max="2"></div>
@@ -322,6 +327,11 @@
           <select id="aiMockRel"><option value="medium">medium</option><option value="high">high</option><option value="low">low</option></select>
         </div>
       </div>
+      <div class="field-row" style="margin-top:10px">
+        <input type="checkbox" id="aiTriageEnabled" checked>
+        <label for="aiTriageEnabled" style="margin:0;color:#cbd5e1;font-size:13px">启用列表初筛（爬取阶段 LLM，与最终分析独立）</label>
+      </div>
+      <p class="muted" style="margin:6px 0 0;font-size:12px">并行批数：同时发起的分析 API 请求数；过大可能触发限流。初筛在 keyword 流水线内串行按批调用。</p>
       <div class="field-row" style="margin-top:10px">
         <input type="checkbox" id="aiMock">
         <label for="aiMock" style="margin:0;color:#cbd5e1;font-size:13px">无 API Key 时使用 Mock 打标（联调用）</label>
@@ -344,20 +354,61 @@
     </div>
     <div class="card" style="margin-top:16px">
       <div class="card-head">
-        <h2>AI 分析过程 · API 用量</h2>
-        <button class="btn btn-gray btn-sm" onclick="loadAnalysisLogs()">刷新</button>
+        <h2>LLM 用量汇总</h2>
+        <div class="btn-group">
+          <select id="aiUsageDays" class="btn btn-gray btn-sm" onchange="loadAnalysisUsage()" style="padding:6px 10px">
+            <option value="7">近 7 天</option>
+            <option value="14">近 14 天</option>
+            <option value="30" selected>近 30 天</option>
+            <option value="90">近 90 天</option>
+          </select>
+          <button class="btn btn-gray btn-sm" onclick="loadAnalysisUsage()">刷新</button>
+        </div>
       </div>
       <div class="field" style="max-width:360px;margin-bottom:10px">
         <label>监测任务</label>
-        <select id="aiLogTask" onchange="loadAnalysisLogs()"><option value="">全部（最新）</option></select>
+        <select id="aiLogTask" onchange="onAiLogTaskFilterChange()"><option value="">全部（最新）</option></select>
       </div>
+      <div id="aiUsageKpi" class="usage-kpi-grid">
+        <div class="usage-kpi"><span class="usage-kpi-label">统计区间合计</span><strong id="aiUsageTotalTokens">—</strong><span class="muted">total tokens</span></div>
+        <div class="usage-kpi"><span class="usage-kpi-label">今日</span><strong id="aiUsageTodayTokens">—</strong><span class="muted">total tokens</span></div>
+        <div class="usage-kpi"><span class="usage-kpi-label">API 调用</span><strong id="aiUsageApiCalls">—</strong><span class="muted">成功 / Mock / 失败</span></div>
+      </div>
+      <div class="usage-split-grid">
+        <div class="usage-split-card">
+          <h3 class="usage-section-title">按阶段</h3>
+          <div id="aiUsageByPhase" class="usage-phase-bars">加载中…</div>
+        </div>
+        <div class="usage-split-card">
+          <h3 class="usage-section-title">输入 / 输出</h3>
+          <div id="aiUsageInOut" class="usage-inout">加载中…</div>
+        </div>
+      </div>
+      <h3 class="usage-section-title">每日用量</h3>
+      <div id="aiUsageDaily" class="usage-daily scroll-sm">加载中…</div>
+      <h3 class="usage-section-title" style="margin-top:14px">按任务</h3>
+      <div class="scroll-sm">
+        <table>
+          <thead><tr>
+            <th>任务</th><th>合计 Tokens</th><th>初筛</th><th>分析</th><th>API 次</th>
+          </tr></thead>
+          <tbody id="aiUsageByTask"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div class="card-head">
+        <h2>AI 分析过程 · 批次日志</h2>
+        <button class="btn btn-gray btn-sm" onclick="loadAnalysisLogs()">刷新</button>
+      </div>
+      <p class="muted" style="margin:0 0 10px;font-size:12px">任务筛选见上方「LLM 用量汇总」。</p>
       <div id="aiUsageSummary" class="meta usage-summary">暂无分析记录</div>
       <div class="scroll-sm">
         <table>
           <thead><tr>
-            <th>时间</th><th>批次</th><th>合作方</th><th>状态</th><th>输入</th><th>耗时</th><th>Tokens (in/out/total)</th><th>写入</th><th>备注</th>
+            <th>时间</th><th>阶段</th><th>批次</th><th>合作方</th><th>状态</th><th>输入</th><th>耗时</th><th>Tokens (in/out/total)</th><th>写入</th><th>备注</th>
           </tr></thead>
-          <tbody id="aiLogBody"><tr><td colspan="9" class="empty">执行监测或重跑 AI 后在此查看</td></tr></tbody>
+          <tbody id="aiLogBody"><tr><td colspan="10" class="empty">执行监测或重跑 AI 后在此查看</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -365,7 +416,7 @@
     <div id="panel-cookies" class="app-panel">
       <div class="card">
         <h2>Cookie 实例（Worker）</h2>
-        <p class="config-hint">按 Worker 实例管理 Cookie 文件；与监测 Run 前 diagnose 使用同一路径。上传与诊断需管理员权限。</p>
+        <p class="config-hint">按 Worker 实例管理 Cookie 文件；与监测 Run 前 diagnose 使用同一路径。上传与诊断需管理员 Session 或 API Key。</p>
         <div class="btn-group" style="margin-bottom:12px">
           <button class="btn btn-gray btn-sm" onclick="loadCookieInstances()">刷新</button>
         </div>
@@ -630,6 +681,8 @@
   <div class="field" id="tCrawlModeField"><label>黑猫爬取模式（单源 fallback）</label><select id="tCrawlMode"><option value="list_first">列表优先</option><option value="legacy" selected>Legacy（合作方×源）</option></select></div>
   <p id="tCrawlModeNote" class="muted" style="margin:6px 0 10px;font-size:12px">混合源任务：爬取策略由<strong>数据源配置</strong>决定（黑猫 legacy / 小红书 list_first）。仅当任务<strong>仅含黑猫</strong>时，上方选项作为 fallback。</p>
   <div class="field-row"><input type="checkbox" id="tFetchDetail"><label for="tFetchDetail" class="toggle-label">Legacy 模式抓取详情</label></div>
+  <div class="field-row"><input type="checkbox" id="tCrawlOnly"><label for="tCrawlOnly" class="toggle-label">仅爬取（稍后 AI 分析）</label></div>
+  <p class="muted" style="margin:4px 0 10px;font-size:12px">勾选后 Run 只完成列表/勘察，跳过最终 AI 匹配；可在任务详情点「增量 AI」补分析。</p>
   <div class="field"><label>忽略早于（不分析，仍入库）</label><input id="tIgnoreBefore" type="date"><span class="config-hint">留空表示不限制；按内容发布时间 published_at 比较，日期缺失仍分析</span></div>
   <div class="field schedule-block">
     <div class="field-row"><input type="checkbox" id="tScheduleEnabled"><label for="tScheduleEnabled" class="toggle-label">启用定时执行（增量）</label></div>
@@ -662,6 +715,7 @@
 <script src="/static/ui-shell.js"></script>
 <script src="/static/schedule-picker.js"></script>
 <script src="/static/app-core.js"></script>
+<script src="/static/list-pagination.js"></script>
 <script src="/static/panel-home.js"></script>
 <script src="/static/panel-raw.js"></script>
 <script src="/static/panel-intel.js"></script>

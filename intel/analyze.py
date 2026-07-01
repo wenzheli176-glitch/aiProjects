@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import socket
 import threading
 import time
 import urllib.error
@@ -83,12 +84,34 @@ def analysis_status():
         'has_api_key': bool(api_key),
         'mock_without_key': bool(ac.get('mock_without_key', False)),
         'mock_mode': not api_key and bool(ac.get('mock_without_key', False)),
-        'batch_size': int(ac.get('batch_size') or 15),
+        'batch_size': int(ac.get('batch_size') or 8),
         'max_body_chars': int(ac.get('max_body_chars') or 2000),
-        'max_retries': int(ac.get('max_retries') or 2),
+        'max_retries': int(ac.get('max_retries') or 3),
         'temperature': float(ac.get('temperature', 0.2)),
-        'timeout_sec': int(ac.get('timeout_sec') or 120),
+        'timeout_sec': int(ac.get('timeout_sec') or 300),
+        'parallel_batches': int(ac.get('parallel_batches') or 3),
     }
+
+
+def _format_llm_call_error(exc, timeout_sec=None):
+    """将 urllib/超时类异常转为可读错误信息。"""
+    limit = timeout_sec if timeout_sec is not None else '?'
+    if isinstance(exc, urllib.error.HTTPError):
+        try:
+            err_body = exc.read().decode('utf-8', errors='replace')[:300]
+        except Exception:
+            err_body = ''
+        return 'LLM HTTP %s%s' % (exc.code, (': %s' % err_body) if err_body else '')
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return 'LLM 读响应超时（timeout=%ss）' % limit
+    if isinstance(exc, urllib.error.URLError):
+        reason = exc.reason
+        if isinstance(reason, (TimeoutError, socket.timeout)):
+            return 'LLM 请求超时（timeout=%ss）' % limit
+        return 'LLM 网络错误: %s' % (reason or exc)
+    if isinstance(exc, OSError) and 'timed out' in str(exc).lower():
+        return 'LLM 请求超时（timeout=%ss）' % limit
+    return 'LLM 调用失败: %s' % str(exc)[:500]
 
 
 def _truncate(text, max_chars):
@@ -192,7 +215,7 @@ def _call_llm(batch, partner):
 
     max_body = int(ac.get('max_body_chars') or 2000)
     temperature = float(ac.get('temperature', 0.2))
-    timeout_sec = int(ac.get('timeout_sec') or 120)
+    timeout_sec = int(ac.get('timeout_sec') or 300)
 
     payload_items = []
     for item in batch:
@@ -233,14 +256,19 @@ def _call_llm(batch, partner):
     try:
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
             raw = resp.read().decode('utf-8')
-            data = json.loads(raw)
+        data = json.loads(raw)
+        usage = _extract_usage(data)
+        content = data['choices'][0]['message']['content']
+        results = _parse_llm_json(content)
     except urllib.error.HTTPError as e:
-        err_body = e.read().decode('utf-8', errors='replace')[:300]
-        raise RuntimeError('HTTP %s: %s' % (e.code, err_body)) from e
+        raise RuntimeError(_format_llm_call_error(e, timeout_sec)) from e
+    except (urllib.error.URLError, TimeoutError, socket.timeout, OSError) as e:
+        raise RuntimeError(_format_llm_call_error(e, timeout_sec)) from e
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
+        raise RuntimeError('LLM 响应解析失败: %s' % str(e)[:200]) from e
+    except Exception as e:
+        raise RuntimeError(_format_llm_call_error(e, timeout_sec)) from e
     latency_ms = int((time.time() - t0) * 1000)
-    usage = _extract_usage(data)
-    content = data['choices'][0]['message']['content']
-    results = _parse_llm_json(content)
     return results, {
         'mock': False,
         'model': model,
@@ -271,10 +299,14 @@ def _log_batch_summary(log_fn, bi, batch_total, partner, batch, meta, batch_writ
     )
 
 
-def analyze_candidates(task_id, job_id, candidates, partner, log_fn=None, run_metrics=None):
+def analyze_candidates(task_id, job_id, candidates, partner, log_fn=None, run_metrics=None, during_crawl=False):
     ac = _analysis_cfg()
     batch_size = int(ac.get('batch_size') or 15)
     parallel_batches = max(1, int(ac.get('parallel_batches') or 1))
+    if during_crawl:
+        during_cfg = ac.get('parallel_batches_during_crawl')
+        if during_cfg is not None:
+            parallel_batches = max(1, int(during_cfg))
     max_retries = int(ac.get('max_retries') or 2)
     retry_delay = float(ac.get('retry_delay_sec') or 1.5)
     model = ac.get('model') or ''
@@ -306,6 +338,28 @@ def analyze_candidates(task_id, job_id, candidates, partner, log_fn=None, run_me
 
     def _process_batch(bi, batch):
         nonlocal written
+        try:
+            return _process_batch_inner(bi, batch)
+        except Exception as e:
+            err = str(e)[:500]
+            _ai_log(log_fn, '批次 %d 意外失败: %s' % (bi + 1, err[:200]), 'ERROR')
+            insert_analysis_log({
+                'job_id': job_id,
+                'task_id': task_id,
+                'batch_index': bi + 1,
+                'partner_name': partner.get('name') or '',
+                'item_count': len(batch),
+                'status': 'failed',
+                'model': model,
+                'latency_ms': 0,
+                'attempt': 0,
+                'error_message': err,
+            })
+            update_analysis_job_usage(job_id, {'failed_batches': 1})
+            return 0
+
+    def _process_batch_inner(bi, batch):
+        nonlocal written
         results = None
         meta = {}
         err = None
@@ -316,8 +370,8 @@ def analyze_candidates(task_id, job_id, candidates, partner, log_fn=None, run_me
             try:
                 results, meta = _call_llm(batch, partner)
                 break
-            except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, KeyError, RuntimeError) as e:
-                err = str(e)
+            except Exception as e:
+                err = str(e)[:500]
                 _ai_log(
                     log_fn,
                     '批次 %d/%d 失败(尝试 %d/%d): %s' % (
@@ -445,7 +499,7 @@ def analyze_candidates(task_id, job_id, candidates, partner, log_fn=None, run_me
         return batch_written
 
     workers = min(parallel_batches, len(batches)) if batches else 1
-    if threading.current_thread() is not threading.main_thread():
+    if threading.current_thread() is not threading.main_thread() and not during_crawl:
         workers = 1
     if workers <= 1 or len(batches) <= 1:
         for bi, batch in enumerate(batches):
@@ -455,7 +509,14 @@ def analyze_candidates(task_id, job_id, candidates, partner, log_fn=None, run_me
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = [pool.submit(_process_batch, bi, batch) for bi, batch in enumerate(batches)]
                 for fut in as_completed(futures):
-                    fut.result()
+                    try:
+                        fut.result()
+                    except Exception as e:
+                        _ai_log(
+                            log_fn,
+                            '并行批次未捕获异常: %s' % str(e)[:200],
+                            'ERROR',
+                        )
         except RuntimeError as e:
             msg = str(e).lower()
             if 'cannot schedule new futures' in msg or 'interpreter shutdown' in msg:

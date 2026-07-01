@@ -47,6 +47,7 @@ def _fire_scheduled_task(task_id):
                 log_fn=log,
                 trigger='schedule',
                 analyze_mode='incremental',
+                crawl_only=bool(task.get('crawl_only')),
             )
         except Exception as e:
             log('[scheduler] 任务 #%d 失败: %s' % (task_id, str(e)[:100]), 'ERROR')

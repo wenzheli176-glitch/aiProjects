@@ -4,9 +4,11 @@
 HEIMAO_EARLY_STOP_DEFAULT = {
     'enabled': True,
     'min_pages': 1,
-    'empty_pages_threshold': 1,
     'protect_first_page': True,
     'empty_page_retry': 0,
+    'end_texts': ['暂无更多'],
+    'end_selectors': [],
+    'saturation_rounds': 2,
 }
 
 XHS_EARLY_STOP_DEFAULT = {
@@ -30,9 +32,13 @@ def early_stop_cfg(site, site_config=None):
     out['enabled'] = bool(out.get('enabled', defaults.get('enabled', True)))
     if site == 'heimao':
         out['min_pages'] = max(1, int(out.get('min_pages', 1) or 1))
-        out['empty_pages_threshold'] = max(1, int(out.get('empty_pages_threshold', 1) or 1))
         out['protect_first_page'] = bool(out.get('protect_first_page', True))
         out['empty_page_retry'] = max(0, int(out.get('empty_page_retry', defaults.get('empty_page_retry', 0)) or 0))
+        texts = out.get('end_texts')
+        out['end_texts'] = list(texts) if isinstance(texts, list) and texts else list(defaults['end_texts'])
+        sels = out.get('end_selectors')
+        out['end_selectors'] = list(sels) if isinstance(sels, list) else []
+        out['saturation_rounds'] = max(1, int(out.get('saturation_rounds', defaults.get('saturation_rounds', 2)) or 2))
     else:
         out['min_pages'] = max(1, int(out.get('min_pages', 1) or 1))
         out['protect_first_page'] = bool(out.get('protect_first_page', True))
@@ -48,18 +54,15 @@ def format_early_stop_log(source, reason, stopped_at, max_pages):
     return 'early_stop: %s · reason=%s · stopped_at=%d/%d' % (source, reason, stopped_at, max_pages)
 
 
-def heimao_should_stop_after_page(es, p, max_pages, new_count, consecutive_empty, page_too_short=False):
-    """返回 (stop, reason, new_consecutive_empty)。"""
+def heimao_should_stop_after_page(
+    es, p, max_pages, new_count, consecutive_empty, page_too_short=False, page_link_count=0,
+):
+    """第 1 轮无新增时早停（protect_first_page）。"""
     if not es.get('enabled') or page_too_short:
         return False, None, consecutive_empty
     if new_count > 0:
         return False, None, 0
-    min_pages = int(es.get('min_pages', 1))
     if p == 1 and es.get('protect_first_page'):
-        return True, 'empty_page', consecutive_empty
-    consecutive_empty += 1
-    threshold = int(es.get('empty_pages_threshold', 1))
-    if consecutive_empty >= threshold and p >= min_pages:
         return True, 'empty_page', consecutive_empty
     return False, None, consecutive_empty
 

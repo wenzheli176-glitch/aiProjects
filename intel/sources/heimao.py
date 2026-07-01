@@ -2,7 +2,16 @@
 
 """黑猫 CrawlAdapter：封装 crawl_heimao。"""
 
+from config import cfg
 from intel.matcher import partner_search_keywords
+
+
+def _heimao_keywords(partner):
+    keywords = partner_search_keywords(partner)
+    limit = int(cfg('heimao', 'max_keywords_per_partner', default=0) or 0)
+    if limit > 0:
+        return keywords[:limit]
+    return keywords
 
 
 class HeimaoCrawlAdapter:
@@ -15,7 +24,7 @@ class HeimaoCrawlAdapter:
         options = options or {}
         from crawler_web import crawl_heimao, S
 
-        keywords = partner_search_keywords(partner)
+        keywords = _heimao_keywords(partner)
         if not keywords:
             return []
         max_pages = int(options.get('max_pages') or task.get('max_pages') or 2)
@@ -24,7 +33,11 @@ class HeimaoCrawlAdapter:
         run_metrics = crawl_ctx.get('run_metrics')
 
         all_results = []
-        for kw in keywords[:3]:
+        if log_fn:
+            log_fn('[heimao] 合作方 %s · %d 个关键词 · 最多 %d 页/词' % (
+                partner.get('name') or '-', len(keywords), max_pages,
+            ))
+        for kw in keywords:
             if not S.running and crawl_ctx.get('monitor_active'):
                 break
             if log_fn:
@@ -70,4 +83,10 @@ class HeimaoCrawlAdapter:
 
     def crawl_investigation(self, crawl_ctx, task, urls, options=None):
         from crawler_web import fetch_heimao_details_by_urls
-        return fetch_heimao_details_by_urls(urls, managed_session=True, log_fn=crawl_ctx.get('log'))
+        options = options or {}
+        return fetch_heimao_details_by_urls(
+            urls,
+            managed_session=True,
+            log_fn=crawl_ctx.get('log'),
+            on_progress=options.get('on_progress'),
+        )

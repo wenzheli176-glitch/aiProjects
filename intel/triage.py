@@ -4,8 +4,8 @@ import json
 import time
 
 from config import cfg
-from intel.analyze import _parse_llm_json, _resolve_api_key, _truncate
-from intel.db import update_raw_triage
+from intel.analyze import _extract_usage, _parse_llm_json, _resolve_api_key, _truncate
+from intel.db import insert_llm_usage_log, update_raw_triage
 
 
 LIST_TRIAGE_PROMPT = """你是舆情列表初筛助手。对每条列表摘要判断是否与任意合作方相关及是否值得深入勘察。
@@ -26,7 +26,7 @@ def _list_triage_cfg():
     return {
         'enabled': bool(lt.get('enabled', True)),
         'model': lt.get('model') or ac.get('model') or 'MiniMax-M3',
-        'batch_size': int(lt.get('batch_size') or 20),
+        'batch_size': int(lt.get('batch_size') or 30),
         'max_body_chars': int(lt.get('max_body_chars') or 400),
         'threshold': lt.get('investigation_threshold') or {},
     }
@@ -52,7 +52,27 @@ def _mock_triage_item(item):
     }
 
 
-def run_list_triage(task_id, raw_rows, partners, log_fn=None, run_metrics=None):
+def _log_triage_batch(task_id, run_id, batch_index, items, meta, processed_count):
+    status = 'mock' if meta.get('mock') else ('failed' if meta.get('failed') else 'ok')
+    insert_llm_usage_log({
+        'task_id': task_id,
+        'run_id': run_id,
+        'phase': 'list_triage',
+        'batch_index': batch_index,
+        'partner_name': meta.get('partner_names') or '',
+        'item_count': len(items),
+        'status': status,
+        'model': meta.get('model') or '',
+        'latency_ms': int(meta.get('latency_ms') or 0),
+        'prompt_tokens': int(meta.get('prompt_tokens') or 0),
+        'completion_tokens': int(meta.get('completion_tokens') or 0),
+        'total_tokens': int(meta.get('total_tokens') or 0),
+        'items_written': processed_count,
+        'error_message': meta.get('error_message') or '',
+    })
+
+
+def run_list_triage(task_id, raw_rows, partners, log_fn=None, run_metrics=None, run_id=None):
     lt_cfg = _list_triage_cfg()
     if not lt_cfg['enabled'] or not raw_rows:
         return {'processed': 0, 'stats': {}}
@@ -61,13 +81,15 @@ def run_list_triage(task_id, raw_rows, partners, log_fn=None, run_metrics=None):
     api_key = _resolve_api_key(ac)
     batch_size = lt_cfg['batch_size']
     max_body = lt_cfg['max_body_chars']
+    partner_label = _partner_names(partners)
     stats = {'triage_high': 0, 'triage_medium': 0, 'triage_noise': 0, 'needs_investigation_count': 0}
     processed = 0
     t0 = time.monotonic()
 
     pending = [r for r in raw_rows if not (r.get('list_triage') or {}).get('triage_relevance')]
-    for i in range(0, len(pending), batch_size):
+    for bi, i in enumerate(range(0, len(pending), batch_size)):
         batch_rows = pending[i:i + batch_size]
+        batch_start = time.monotonic()
         items = []
         for row in batch_rows:
             payload = row.get('payload') or {}
@@ -81,9 +103,20 @@ def run_list_triage(task_id, raw_rows, partners, log_fn=None, run_metrics=None):
 
         if not api_key and ac.get('mock_without_key'):
             results = [_mock_triage_item(it) for it in items]
+            meta = {
+                'mock': True,
+                'model': lt_cfg['model'],
+                'latency_ms': int((time.monotonic() - batch_start) * 1000),
+                'prompt_tokens': 0,
+                'completion_tokens': 0,
+                'total_tokens': 0,
+                'partner_names': partner_label,
+            }
         else:
-            results = _call_triage_llm(items, partners, ac, lt_cfg, log_fn)
+            results, meta = _call_triage_llm(items, partners, ac, lt_cfg, log_fn)
+            meta['partner_names'] = partner_label
 
+        batch_processed = 0
         for res in results:
             rid = res.get('id')
             if not rid:
@@ -96,6 +129,7 @@ def run_list_triage(task_id, raw_rows, partners, log_fn=None, run_metrics=None):
             }
             update_raw_triage(rid, triage)
             processed += 1
+            batch_processed += 1
             rel = triage['triage_relevance']
             if rel == 'high':
                 stats['triage_high'] += 1
@@ -105,6 +139,8 @@ def run_list_triage(task_id, raw_rows, partners, log_fn=None, run_metrics=None):
                 stats['triage_noise'] += 1
             if triage['needs_investigation']:
                 stats['needs_investigation_count'] += 1
+
+        _log_triage_batch(task_id, run_id, bi + 1, items, meta, batch_processed)
 
     if run_metrics:
         elapsed = int((time.monotonic() - t0) * 1000)
@@ -129,6 +165,7 @@ def _call_triage_llm(items, partners, ac, lt_cfg, log_fn=None):
     }
     api_key = _resolve_api_key(ac)
     endpoint = ac.get('endpoint') or ''
+    t0 = time.monotonic()
     req = urllib.request.Request(
         endpoint,
         data=json.dumps(body).encode('utf-8'),
@@ -144,8 +181,38 @@ def _call_triage_llm(items, partners, ac, lt_cfg, log_fn=None):
         content = data['choices'][0]['message']['content']
         parsed = _parse_llm_json(content)
         if isinstance(parsed, list):
-            return parsed
+            return parsed, {
+                'mock': False,
+                'model': lt_cfg['model'],
+                'latency_ms': int((time.monotonic() - t0) * 1000),
+                **(_extract_usage(data)),
+            }
     except Exception as e:
         if log_fn:
             log_fn('[triage] LLM 失败: %s' % str(e)[:80], 'WARN')
-    return [_mock_triage_item(it) for it in items]
+        return (
+            [_mock_triage_item(it) for it in items],
+            {
+                'mock': True,
+                'failed': True,
+                'model': lt_cfg['model'],
+                'latency_ms': int((time.monotonic() - t0) * 1000),
+                'prompt_tokens': 0,
+                'completion_tokens': 0,
+                'total_tokens': 0,
+                'error_message': str(e)[:500],
+            },
+        )
+    return (
+        [_mock_triage_item(it) for it in items],
+        {
+            'mock': True,
+            'failed': True,
+            'model': lt_cfg['model'],
+            'latency_ms': int((time.monotonic() - t0) * 1000),
+            'prompt_tokens': 0,
+            'completion_tokens': 0,
+            'total_tokens': 0,
+            'error_message': 'invalid LLM response',
+        },
+    )

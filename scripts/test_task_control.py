@@ -207,15 +207,15 @@ def test_aggregate_subtask_timing():
     k1 = create_keyword_run(run_id, task['id'], 'xhs', 'kw1')
     update_keyword_run(
         k1, status='done', phase='done',
-        stats_json={'phase_timing_ms': {'list_crawl_ms': 1000, 'analyze_ms': 2000, 'investigation_ms': 500}},
+        stats_json={'phase_timing_ms': {'list_crawl_ms': 1000, 'triage_ms': 2000, 'investigation_ms': 500}},
     )
     by_source = aggregate_subtask_timing_by_source(run_id)
     assert by_source['xhs']['crawl_ms'] == 1000
-    assert by_source['xhs']['analyze_ms'] == 2000
+    assert by_source['xhs']['triage_ms'] == 2000
     subs = build_run_subtasks_by_source(run_id, task.get('sources'))
     xhs = next(s for s in subs if s['source_id'] == 'xhs')
     assert xhs['timing']['crawl_ms'] == 1000
-    assert xhs['timing']['analyze_ms'] == 2000
+    assert xhs['timing']['triage_ms'] == 2000
     print('OK test_aggregate_subtask_timing')
 
 

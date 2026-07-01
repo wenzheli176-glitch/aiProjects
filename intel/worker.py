@@ -16,8 +16,10 @@ from intel.db import (
     get_monitor_task,
     get_partner,
     insert_raw_records,
+    sync_task_subtask_progress,
     update_run_worker_state,
 )
+from intel.ignore_before import raw_insert_log_parts, resolve_ignore_before
 from intel.investigation import process_investigation_batch
 from intel.registry import register_default_sources, registry
 from intel.run_state import is_halt_requested, is_stop_requested
@@ -149,10 +151,17 @@ def _execute_work_item(item, task, instance, crawl_ctx, run_metrics, worker_sess
         crawl_ms = int((time.monotonic() - t0) * 1000)
         if run_metrics:
             run_metrics.add_crawl_ms(source_id, crawl_ms)
-        insert_raw_records(
+        ignore_before = resolve_ignore_before(task=task)
+        ins = insert_raw_records(
             task_id, partner['id'], source_id, keyword, raw_list or [],
             run_metrics=run_metrics, crawl_phase='legacy',
+            ignore_before=ignore_before,
         )
+        log_fn = crawl_ctx.get('log')
+        if log_fn:
+            parts = raw_insert_log_parts(ins, ignore_before)
+            if parts:
+                log_fn('[monitor] raw %s' % ' · '.join(parts))
         return
 
     if phase == 'keyword_pipeline':
@@ -177,17 +186,28 @@ def _execute_work_item(item, task, instance, crawl_ctx, run_metrics, worker_sess
         crawl_ms = int((time.monotonic() - t0) * 1000)
         if run_metrics:
             run_metrics.add_crawl_ms(source_id, crawl_ms)
-        insert_raw_records(
+        ignore_before = resolve_ignore_before(task=task)
+        ins = insert_raw_records(
             task_id, None, source_id, kw_label, raw_list or [],
             run_metrics=run_metrics, crawl_phase='list',
+            ignore_before=ignore_before,
         )
+        log_fn = crawl_ctx.get('log')
+        if log_fn:
+            parts = raw_insert_log_parts(ins, ignore_before)
+            if parts:
+                log_fn('[monitor] raw %s' % ' · '.join(parts))
         return
 
     if phase == 'investigation':
         batch_items = payload.get('items') or []
         process_investigation_batch(
             source_id, batch_items, task, crawl_ctx, run_metrics=run_metrics,
+            work_item_id=item.get('id'),
         )
+        run_id = (crawl_ctx or {}).get('run_id')
+        if run_id:
+            sync_task_subtask_progress(task_id, run_id)
         return
 
     raise ValueError('Worker 未支持的 phase: %s' % phase)
@@ -313,7 +333,7 @@ def run_worker_loop(run_id, task_id, source_id, instance_cfg):
                     crawl_ms = max(0, int((time.monotonic() - t0) * 1000))
                     phase_timing = {
                         'list_crawl_ms': 0,
-                        'analyze_ms': 0,
+                        'triage_ms': 0,
                         'investigation_ms': 0,
                     }
                     phase = item.get('phase') or ''

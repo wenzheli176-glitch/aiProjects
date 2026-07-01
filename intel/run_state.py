@@ -47,6 +47,28 @@ def is_monitor_busy():
     return has_active_monitor_run()
 
 
+def is_reanalyze_allowed(task_id, analyze_mode='incremental'):
+    """是否允许 reanalyze：本任务 crawling/analyzing 时 incremental 放行（含 crawl_only）。"""
+    from intel.db import count_raw_records, get_monitor_task
+
+    task = get_monitor_task(task_id)
+    if not task:
+        return False, '任务不存在'
+    if count_raw_records(task_id) <= 0:
+        return False, '无原始数据，请先执行完整监测'
+    if analyze_mode == 'full_replace':
+        if task.get('status') in ('crawling', 'analyzing'):
+            return False, '任务运行中不可全量重分析'
+        if is_monitor_busy():
+            return False, '已有其他任务进行中'
+        return True, ''
+    if task.get('status') in ('crawling', 'analyzing'):
+        return True, ''
+    if is_monitor_busy():
+        return False, '已有任务进行中'
+    return True, ''
+
+
 def is_pause_requested(run_id, source_id=None):
     if not run_id:
         return False

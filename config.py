@@ -112,7 +112,7 @@ DEFAULT_CONFIG = {
         'default_max_pages': 2,
         'default_fetch_detail': True,
         'base_url': 'https://tousu.sina.com.cn/',
-        'search_url_template': 'https://tousu.sina.com.cn/index/search/?keywords={keyword}&t={page}',
+        'search_url_template': 'https://tousu.sina.com.cn/index/search/?keywords={keyword}&page={page}',
         'search_input_selector': 'input[placeholder*="搜索"]',
         'link_regex': r'<a\s+[^>]*href="([^"]*tousu\.sina\.com\.cn/complaint/view/[^"]*)"[^>]*>(.*?)</a>',
         'min_link_text_len': 15,
@@ -131,6 +131,12 @@ DEFAULT_CONFIG = {
         'typing_delay_max': 150,
         'title_max_len': 100,
         'list_title_preview_len': 40,
+        'max_keywords_per_partner': 0,
+        'scroll_times_per_page': 3,
+        'scroll_pixels': 1500,
+        'scroll_wait_seconds': 2,
+        'scroll_to_bottom': True,
+        'scroll_container_selector': '',
         'normalize': {
             'include_reply_in_body': True,
             'include_merchant_in_body': True,
@@ -143,9 +149,11 @@ DEFAULT_CONFIG = {
         'early_stop': {
             'enabled': True,
             'min_pages': 1,
-            'empty_pages_threshold': 1,
             'protect_first_page': True,
             'empty_page_retry': 0,
+            'end_texts': ['暂无更多'],
+            'end_selectors': [],
+            'saturation_rounds': 2,
         },
         'empty_search': {
             'login_on_missing_sid': False,
@@ -279,6 +287,10 @@ DEFAULT_CONFIG = {
         'scheduler_timezone': 'Asia/Shanghai',
         'crawl_mode': 'list_first',
         'industry_batch_max_keywords': 5,
+        'investigation_batch_size': 20,
+        'analyze_during_crawl': True,
+        'analyze_drain_interval_sec': 60,
+        'analyze_drain_max_batches_per_tick': None,
         'priority_quota': {'P0': 0.5, 'P1': 0.3, 'P2': 0.2},
         'run_state': {
             'claim_timeout_sec': 600,
@@ -310,6 +322,7 @@ DEFAULT_CONFIG = {
             'login_cdp_port_base': 9250,
             'login_wait_timeout_sec': 600,
         },
+        'default_crawl_only': False,
     },
     'analysis': {
         'provider': 'minimax',
@@ -320,13 +333,13 @@ DEFAULT_CONFIG = {
         'api_key': '',
         'prompt_version': 'v1-high-recall-minimax-m3',
         'active_prompt_id': 'default-high-recall',
-        'batch_size': 10,
-        'parallel_batches': 5,
+        'batch_size': 8,
+        'parallel_batches': 3,
         'max_body_chars': 2000,
-        'max_retries': 2,
-        'retry_delay_sec': 2,
+        'max_retries': 3,
+        'retry_delay_sec': 3,
         'temperature': 0.3,
-        'timeout_sec': 180,
+        'timeout_sec': 300,
         'mock_without_key': False,
         'mock_default_relevance': 'medium',
         'recency': {
@@ -342,7 +355,7 @@ DEFAULT_CONFIG = {
         'list_triage': {
             'enabled': True,
             'model': 'MiniMax-M3',
-            'batch_size': 20,
+            'batch_size': 30,
             'max_body_chars': 400,
             'investigation_threshold': {
                 'min_relevance': 'medium',
@@ -369,6 +382,13 @@ DEFAULT_CONFIG = {
         'session_secret_env': 'ADMIN_SESSION_SECRET',
         'session_secret': '',
         'session_ttl_hours': 8,
+    },
+    'api_auth': {
+        'enabled': True,
+        'key_env': 'INTEL_API_KEY',
+        'keys_env': 'INTEL_API_KEYS',
+        'keys': [],
+        'allow_admin_session': True,
     },
 }
 

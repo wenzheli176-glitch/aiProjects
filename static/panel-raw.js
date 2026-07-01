@@ -1,4 +1,7 @@
 /* 源数据 Tab */
+var rawListPage = 1;
+var rawListPageSize = LIST_PAGE_SIZE_DEFAULT;
+
 function rawFilterParams() {
   const p = new URLSearchParams();
   const task = document.getElementById('frTask');
@@ -10,6 +13,11 @@ function rawFilterParams() {
   return p;
 }
 
+function onRawFilterChange() {
+  rawListPage = 1;
+  loadRawRecords();
+}
+
 function syncRawFiltersFromQuery() {
   const q = App.readQuery();
   const set = function(id, key) {
@@ -19,6 +27,8 @@ function syncRawFiltersFromQuery() {
   set('frTask', 'task_id');
   set('frPartner', 'partner_id');
   set('frSource', 'source');
+  if (q.get('raw_page')) rawListPage = Math.max(1, parseInt(q.get('raw_page'), 10) || 1);
+  if (q.get('raw_page_size')) rawListPageSize = clampListPageSize(q.get('raw_page_size'));
 }
 
 function onRawTabActivate() {
@@ -51,19 +61,25 @@ async function showRawDetail(rawId) {
     if (!d.ok || !d.record) throw new Error(d.msg || '不存在');
     const r = d.record;
     const payload = r.payload || {};
+    const rawUrl = r.url || payload.link || payload.url || '';
     const intelLink = r.intel_id
       ? '<button class="btn btn-gray btn-sm" onclick="App.setQuery({tab:\'intel\',intel_id:' + r.intel_id + '});App.switchAppTab(\'intel\')">查看情报 #' + r.intel_id + '</button>'
       : '<span class="muted">暂无关联情报</span>';
+    const sourceLink = rawUrl
+      ? '<a href="' + esc(rawUrl) + '" target="_blank" rel="noopener" class="btn btn-gray btn-sm">打开原文</a>'
+      : '<span class="muted">无原文链接</span>';
     box.innerHTML =
       '<div class="detail-head"><button class="btn btn-gray btn-sm" onclick="backToRawList()">← 返回列表</button>'
       + '<h2>源数据 #' + r.id + '</h2></div>'
       + '<div class="detail-meta">'
       + metaRow('任务', '#' + r.task_id) + metaRow('合作方', '#' + (r.partner_id || ''))
       + metaRow('来源', r.source) + metaRow('关键词', r.keyword)
+      + metaRow('爬取阶段', r.crawl_phase || '—')
       + metaRow('发布时间', fmtTime(r.published_at) || '—') + metaRow('采集时间', fmtTime(r.created_at))
       + metaRow('更新时间', fmtTime(r.updated_at))
+      + (rawUrl ? metaRowLink('原文链接', rawUrl) : metaRow('原文链接', '—'))
       + metaRow('dedup_key', r.dedup_key || '—') + metaRow('content_hash', r.content_hash || '—')
-      + '</div><div class="detail-actions">' + intelLink + '</div>'
+      + '</div><div class="detail-actions">' + sourceLink + ' ' + intelLink + '</div>'
       + '<h3 class="detail-subtitle">Payload</h3>'
       + '<pre class="detail-pre">' + esc(JSON.stringify(payload, null, 2)) + '</pre>';
     App.setQuery({ raw_id: rawId }, true);
@@ -74,6 +90,11 @@ async function showRawDetail(rawId) {
 
 function metaRow(k, v) {
   return '<div class="detail-kv"><span class="k">' + esc(k) + '</span><span class="v">' + esc(v) + '</span></div>';
+}
+
+function metaRowLink(k, url) {
+  return '<div class="detail-kv"><span class="k">' + esc(k) + '</span><span class="v">'
+    + '<a href="' + esc(url) + '" target="_blank" rel="noopener" class="link-muted">' + esc(url) + '</a></span></div>';
 }
 
 function backToRawList() {
@@ -89,12 +110,33 @@ async function loadRawRecords() {
   const countEl = document.getElementById('rawRecordCount');
   if (!body) return;
   const params = rawFilterParams();
-  params.set('page', '1');
-  params.set('page_size', '100');
+  params.set('page', String(rawListPage));
+  params.set('page_size', String(rawListPageSize));
   try {
     const d = await api('/api/raw/records?' + params.toString());
     const rows = d.records || [];
-    if (countEl) countEl.textContent = '(共 ' + (d.total || rows.length) + ' 条)';
+    const total = d.total != null ? d.total : rows.length;
+    const page = d.page || rawListPage;
+    const pageSize = d.page_size || rawListPageSize;
+    rawListPage = page;
+    rawListPageSize = clampListPageSize(pageSize);
+    if (countEl) countEl.textContent = '(' + formatListCountMeta(total, page, pageSize) + ')';
+    renderListPagination('rawListPagination', {
+      page: page,
+      pageSize: rawListPageSize,
+      total: total,
+      onPageChange: function(p) {
+        rawListPage = p;
+        App.setQuery({ raw_page: p, raw_page_size: rawListPageSize }, true);
+        loadRawRecords();
+      },
+      onPageSizeChange: function(s) {
+        rawListPageSize = s;
+        rawListPage = 1;
+        App.setQuery({ raw_page: 1, raw_page_size: s }, true);
+        loadRawRecords();
+      },
+    });
     if (!rows.length) {
       body.innerHTML = '<tr><td colspan="10" class="empty">暂无源数据</td></tr>';
       return;

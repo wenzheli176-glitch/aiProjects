@@ -20,6 +20,7 @@ from intel.db import (
     update_task_status,
 )
 from intel.error_util import format_exception
+from intel.ignore_before import raw_insert_log_parts, resolve_ignore_before, should_skip_ignore_before
 from intel.investigation import (
     build_investigation_queue,
     run_investigation_crawl,
@@ -90,7 +91,17 @@ def _get_enabled_partners(task):
     return [p for p in partners if p and p.get('enabled', True)]
 
 
-def _should_analyze_raw(row, shared_pool=False):
+def _should_analyze_raw(row, shared_pool=False, detail_only=False, task=None):
+    if detail_only:
+        phase = row.get('crawl_phase') or 'legacy'
+        if phase == 'detail':
+            return True
+        if phase == 'list':
+            return False
+        if row.get('source') == 'heimao' and phase == 'legacy':
+            from intel.investigation import _heimao_routine_has_detail
+            return _heimao_routine_has_detail(row, task=task)
+        return False
     if not shared_pool:
         return True
     phase = row.get('crawl_phase') or 'legacy'
@@ -105,20 +116,6 @@ def _should_analyze_raw(row, shared_pool=False):
     return phase in ('legacy', 'detail')
 
 
-def _should_skip_ignore_before(published_at, ignore_before):
-    cutoff = (ignore_before or '').strip()
-    if not cutoff:
-        return False
-    pub = (published_at or '').strip()
-    if not pub:
-        return False
-    pub_day = pub[:10]
-    cutoff_day = cutoff[:10]
-    if len(pub_day) < 10 or len(cutoff_day) < 10:
-        return False
-    return pub_day < cutoff_day
-
-
 def _build_candidates_from_raw(
     task_id,
     partners,
@@ -126,13 +123,18 @@ def _build_candidates_from_raw(
     run_metrics=None,
     shared_pool=False,
     ignore_before=None,
+    detail_only=False,
+    task=None,
 ):
     candidates_by_partner = {}
     raw_rows = list_raw_records(task_id)
     analysis_state = get_raw_analysis_state(task_id) if analyze_mode == 'incremental' else {}
 
     for row in raw_rows:
-        if shared_pool and not _should_analyze_raw(row, shared_pool=True):
+        if detail_only:
+            if not _should_analyze_raw(row, shared_pool=True, detail_only=True, task=task):
+                continue
+        elif shared_pool and not _should_analyze_raw(row, shared_pool=True):
             continue
         if analyze_mode == 'incremental':
             st = analysis_state.get(row['id']) or {}
@@ -153,7 +155,7 @@ def _build_candidates_from_raw(
         payload['_anchor_at'] = row.get('updated_at') or row.get('created_at') or ''
         normalized = normalizer.normalize(payload)
 
-        if _should_skip_ignore_before(normalized.get('published_at'), ignore_before):
+        if should_skip_ignore_before(normalized.get('published_at'), ignore_before):
             if run_metrics:
                 run_metrics.record_intel_skipped_ignore_before(1)
             continue
@@ -202,6 +204,48 @@ def _build_candidates_from_raw(
             group['partner'] = partner
             group['items'].append(cand)
     return candidates_by_partner
+
+
+def _resolve_crawl_only(task, crawl_only=None, resume_from_run_id=None):
+    """解析 crawl_only：显式参数 > resume 源 Run > 任务配置 > 全局默认。"""
+    if crawl_only is not None:
+        return bool(crawl_only)
+    if resume_from_run_id:
+        old = get_task_run(resume_from_run_id)
+        if old is not None:
+            return bool(old.get('crawl_only'))
+    if task.get('crawl_only'):
+        return True
+    return bool(cfg('monitor', 'default_crawl_only', default=False))
+
+
+def _count_pending_analyze_raw(
+    task_id,
+    partners,
+    analyze_mode='incremental',
+    shared_pool=False,
+    task=None,
+    detail_only=False,
+):
+    ignore_before = None
+    if task and isinstance(task.get('business_spec'), dict):
+        ignore_before = task['business_spec'].get('ignore_before')
+    groups = _build_candidates_from_raw(
+        task_id,
+        partners,
+        analyze_mode=analyze_mode,
+        shared_pool=shared_pool,
+        ignore_before=ignore_before,
+        detail_only=detail_only,
+        task=task,
+    )
+    seen = set()
+    for group in groups.values():
+        for c in group.get('items') or []:
+            rid = c.get('raw_record_id')
+            if rid:
+                seen.add(rid)
+    return len(seen)
 
 
 def _apply_failure_halt(task_id, run_id, run_metrics, err_msg, progress_phase='crawl', reason='failed'):
@@ -315,6 +359,7 @@ def _run_analysis_phase(
     timeout_check=None,
     shared_pool=False,
     task=None,
+    detail_only=False,
 ):
     ignore_before = None
     if task and isinstance(task.get('business_spec'), dict):
@@ -330,6 +375,8 @@ def _run_analysis_phase(
         run_metrics=run_metrics,
         shared_pool=shared_pool,
         ignore_before=ignore_before,
+        detail_only=detail_only,
+        task=task,
     )
     ac = cfg('analysis') or {}
     job_id = create_analysis_job(
@@ -369,6 +416,29 @@ def _run_analysis_phase(
         elapsed = int((time.monotonic() - analyze_start) * 1000)
         if run_metrics.analyze_duration_ms < elapsed:
             run_metrics.analyze_duration_ms = elapsed
+    from intel.db import get_analysis_job
+    usage = (get_analysis_job(job_id) or {}).get('usage') or {}
+    failed_batches = int(usage.get('failed_batches') or 0)
+    if failed_batches and log_fn:
+        if total_written > 0:
+            log_fn(
+                '[monitor] AI 分析部分批次失败：%d 批失败，已写入 %d 条情报' % (
+                    failed_batches, total_written,
+                ),
+                'WARN',
+            )
+        else:
+            log_fn(
+                '[monitor] AI 分析全部批次失败：%d 批，请检查 endpoint / API Key / timeout_sec' % (
+                    failed_batches,
+                ),
+                'ERROR',
+            )
+    if failed_batches and total_written == 0:
+        raise RuntimeError(
+            'AI 分析全部批次失败（%d 批），常见原因：LLM 超时、API Key 无效或 endpoint 不可达'
+            % failed_batches
+        )
     return total_written
 
 
@@ -403,7 +473,7 @@ def _run_post_list_crawl_phases(
     update_task_status(task_id, 'analyzing', progress={'phase': 'list_triage', 'run_id': run_id})
     list_raw_rows = _list_phase_raw_rows(task_id)
     triage_result = run_list_triage(
-        task_id, list_raw_rows, partners, log_fn=log_fn, run_metrics=run_metrics,
+        task_id, list_raw_rows, partners, log_fn=log_fn, run_metrics=run_metrics, run_id=run_id,
     )
     if log_fn:
         log_fn('[monitor] 列表初筛 %d 条' % triage_result.get('processed', 0))
@@ -416,7 +486,12 @@ def _run_post_list_crawl_phases(
 
     update_task_status(
         task_id, 'crawling',
-        progress={'phase': 'investigation_crawl', 'queued': queued, 'run_id': run_id},
+        progress={
+            'phase': 'investigation_crawl',
+            'queued': queued,
+            'run_id': run_id,
+            'investigation': {'total': queued, 'pending': queued, 'done': 0, 'failed': 0},
+        },
     )
     if use_workers:
         if log_fn:
@@ -424,6 +499,7 @@ def _run_post_list_crawl_phases(
         ok = run_investigation_crawl_with_workers(
             run_id, task_id, post_sources,
             log_fn=log_fn, timeout_check=timeout_check,
+            run_metrics=run_metrics, crawl_only=task.get('crawl_only'),
         )
         if not ok:
             return False
@@ -523,7 +599,6 @@ def _run_xhs_keyword_pipelines(
             update_keyword_run(kr_id, stats_json=stats)
         if log_fn:
             log_fn('[monitor] 账号 %s (%s)' % (account.get('label') or '', account.get('id')))
-        t0 = time.monotonic()
         try:
             run_xhs_keyword_pipeline(
                 crawl_ctx, task, partners,
@@ -538,7 +613,6 @@ def _run_xhs_keyword_pipelines(
                 log_fn('[monitor] keyword 失败 %s: %s' % (
                     spec['keyword'][:40], str(e)[:200],
                 ), 'ERROR')
-        run_metrics.add_crawl_ms('xhs', int((time.monotonic() - t0) * 1000))
 
     sync_task_subtask_progress(task_id, run_id)
     return True
@@ -610,10 +684,16 @@ def _run_list_crawl_only(
             })
             crawl_ms = int((time.monotonic() - t0) * 1000)
             run_metrics.add_crawl_ms(source_id, crawl_ms)
-            insert_raw_records(
+            ignore_before = resolve_ignore_before(task=task)
+            ins = insert_raw_records(
                 task_id, None, source_id, kw_label, raw_list or [],
                 run_metrics=run_metrics, crawl_phase='list',
+                ignore_before=ignore_before,
             )
+            if log_fn:
+                parts = raw_insert_log_parts(ins, ignore_before)
+                if parts:
+                    log_fn('[monitor] raw %s' % ' · '.join(parts))
     return True
 
 
@@ -687,19 +767,16 @@ def _run_legacy_crawl(task_id, task, partners, sources, crawl_ctx, run_metrics, 
             })
             crawl_ms = int((time.monotonic() - t0) * 1000)
             run_metrics.add_crawl_ms(source_id, crawl_ms)
+            ignore_before = resolve_ignore_before(task=task)
             ins = insert_raw_records(
                 task_id, partner['id'], source_id, keyword, raw_list or [],
                 run_metrics=run_metrics, crawl_phase='legacy',
+                ignore_before=ignore_before,
             )
-            if log_fn and any(ins.get(k) for k in ('inserted', 'updated', 'unchanged')):
-                parts = []
-                if ins.get('inserted'):
-                    parts.append('新增 %d' % ins['inserted'])
-                if ins.get('updated'):
-                    parts.append('更新 %d' % ins['updated'])
-                if ins.get('unchanged'):
-                    parts.append('未变 %d' % ins['unchanged'])
-                log_fn('[monitor] raw %s' % ' · '.join(parts))
+            if log_fn:
+                parts = raw_insert_log_parts(ins, ignore_before)
+                if parts:
+                    log_fn('[monitor] raw %s' % ' · '.join(parts))
     return True
 
 
@@ -724,6 +801,8 @@ def reanalyze_monitor_task(
     run_id=None,
 ):
     from crawler_web import S
+    from intel.analyze_drain import drain_analyze_ready
+    from intel.run_state import is_reanalyze_allowed
 
     if analyze_mode is None:
         analyze_mode = 'full_replace' if replace else 'incremental'
@@ -731,8 +810,9 @@ def reanalyze_monitor_task(
     task = get_monitor_task(task_id)
     if not task:
         raise ValueError('任务不存在: %s' % task_id)
-    if is_monitor_busy():
-        raise RuntimeError('已有任务进行中')
+    allowed, block_msg = is_reanalyze_allowed(task_id, analyze_mode)
+    if not allowed:
+        raise RuntimeError(block_msg or '不可重分析')
     if not list_raw_records(task_id):
         raise ValueError('无原始数据，请先执行完整监测')
 
@@ -742,6 +822,25 @@ def reanalyze_monitor_task(
         return 0
 
     shared = task_uses_shared_pool(task)
+
+    if task.get('status') in ('crawling', 'analyzing') and analyze_mode == 'incremental':
+        active_run_id = (task.get('progress') or {}).get('run_id') or run_id
+        if not active_run_id:
+            active_run_id = create_task_run(task_id, trigger=trigger, analyze_mode=analyze_mode)
+        run_metrics = RunMetrics()
+        if log_fn:
+            log_fn('[monitor] 运行中增量 AI（detail-only，不中断爬取）')
+        return drain_analyze_ready(
+            task_id,
+            active_run_id,
+            task,
+            partners=partners,
+            trigger='manual',
+            run_metrics=run_metrics,
+            log_fn=log_fn,
+            crawl_only=task.get('crawl_only'),
+        )
+
     run_metrics = RunMetrics()
     if not run_id:
         run_id = create_task_run(task_id, trigger=trigger, analyze_mode=analyze_mode)
@@ -784,7 +883,7 @@ def reanalyze_monitor_task(
             log_fn('AI 分析失败: %s' % err_msg.splitlines()[0], 'ERROR')
             if '\n' in err_msg:
                 log_fn(err_msg, 'ERROR')
-        raise
+        return 0
     finally:
         _finish_run(run_id, run_metrics, status=final_status, error_message=err_msg)
         S.running = False
@@ -810,6 +909,7 @@ def run_monitor_task(
     retry_keyword_run_ids=None,
     resume_from_run_id=None,
     resume_sources=None,
+    crawl_only=None,
 ):
     from config import load_config
     from crawler_web import S, close_cdp, prepare_browser_for_crawl
@@ -838,21 +938,26 @@ def run_monitor_task(
     has_legacy = any(m == 'legacy' for m in modes.values())
     shared_pool = has_list_first
 
+    crawl_only = _resolve_crawl_only(task, crawl_only=crawl_only, resume_from_run_id=resume_from_run_id)
+
     run_metrics = RunMetrics()
     if not run_id:
-        run_id = create_task_run(task_id, trigger=trigger, analyze_mode=analyze_mode)
+        run_id = create_task_run(
+            task_id, trigger=trigger, analyze_mode=analyze_mode, crawl_only=crawl_only,
+        )
 
     progress_patch = {
         'phase': 'list_crawl' if shared_pool else 'crawl',
         'done': 0,
         'total': 0,
         'run_id': run_id,
+        'crawl_only': crawl_only,
     }
     if trigger == 'resume' and resume_from_run_id:
         progress_patch['resume_run_id'] = resume_from_run_id
 
     sources = task.get('sources') or []
-    budget = monitor_timeout_config_from_cfg(cfg)
+    budget = monitor_timeout_config_from_cfg(cfg, crawl_only=crawl_only)
     warn_if_analysis_timeout_clamped(budget, log_fn=log_fn)
     timeout_unlimited = bool(budget.get('unlimited'))
     timeout_sec = budget['task_timeout_sec']
@@ -981,23 +1086,25 @@ def run_monitor_task(
 
                 def _maybe_run_post_list_during_crawl():
                     if post_list_state['ran'] or retry_mode or not has_list_first:
-                        return
-                    if timeout_check('crawl'):
-                        return
-                    from intel.crawl_queue import source_queue_idle
-                    if crawl_modes_for_task(task).get('heimao') != 'list_first':
-                        return
-                    if not source_queue_idle(run_id, 'heimao'):
-                        return
-                    if log_fn:
-                        log_fn('[monitor] 黑猫 list 已完成，开始初筛/勘察（不阻塞小红书 keyword）')
-                    post_ok = _run_post_list_crawl_phases(
-                        task_id, task, partners, crawl_ctx, run_metrics, run_id, log_fn, timeout_check,
-                        use_workers=True, sources=sources,
+                        pass
+                    elif not timeout_check('crawl'):
+                        from intel.crawl_queue import source_queue_idle
+                        if crawl_modes_for_task(task).get('heimao') == 'list_first' and source_queue_idle(run_id, 'heimao'):
+                            if log_fn:
+                                log_fn('[monitor] 黑猫 list 已完成，开始初筛/勘察（不阻塞小红书 keyword）')
+                            post_ok = _run_post_list_crawl_phases(
+                                task_id, task, partners, crawl_ctx, run_metrics, run_id, log_fn, timeout_check,
+                                use_workers=True, sources=sources,
+                            )
+                            post_list_state['ran'] = True
+                            post_list_state['ok'] = post_ok
+                            run_metrics.stats['_post_list_ran'] = True
+                    from intel.analyze_drain import maybe_timer_drain_analyze
+                    maybe_timer_drain_analyze(
+                        task_id, run_id, task, partners=partners,
+                        run_metrics=run_metrics, log_fn=log_fn, crawl_only=crawl_only,
+                        timeout_check=lambda: timeout_check('crawl'),
                     )
-                    post_list_state['ran'] = True
-                    post_list_state['ok'] = post_ok
-                    run_metrics.stats['_post_list_ran'] = True
 
                 ok = run_routine_crawl_with_workers(
                     run_id, task_id, task, partners, sources, log_fn=log_fn,
@@ -1114,15 +1221,73 @@ def run_monitor_task(
                 )
             return
 
-        remaining = float('inf') if timeout_unlimited else max(0, task_deadline - time.monotonic())
+        if crawl_only:
+            pending_count = _count_pending_analyze_raw(
+                task_id, partners, analyze_mode=analyze_mode,
+                shared_pool=shared_pool, task=task,
+            )
+            run_metrics.stats['analyze_deferred'] = True
+            run_metrics.stats['pending_analyze_raw_count'] = pending_count
+            if log_fn:
+                log_fn(
+                    '[monitor] 仅爬取模式：跳过 AI 分析，待分析 raw %d 条'
+                    % pending_count,
+                )
+            update_task_status(
+                task_id,
+                'failed' if sub_err else 'done',
+                error_message=err_msg if sub_err else '',
+                progress={
+                    'phase': 'crawl_done',
+                    'analyze_pending': True,
+                    'pending_analyze_raw_count': pending_count,
+                    'run_id': run_id,
+                },
+            )
+            if log_fn:
+                if sub_err:
+                    log_fn('仅爬取完成（含失败子任务）：%s' % sub_err, 'WARN')
+                else:
+                    log_fn('仅爬取完成，请使用「增量 AI」生成情报')
+            if sub_err:
+                final_status = 'failed'
+                err_msg = sub_err
+            return
+
+        remaining = _count_pending_analyze_raw(
+            task_id, partners, analyze_mode=analyze_mode,
+            shared_pool=shared_pool, task=task, detail_only=True,
+        )
+        if remaining <= 0:
+            if log_fn:
+                log_fn('[monitor] during-crawl drain 已完成，跳过收尾 AI 分析')
+            update_task_status(
+                task_id,
+                'failed' if sub_err else 'done',
+                error_message=err_msg if sub_err else '',
+                progress={
+                    'phase': 'done' if not sub_err else 'crawl_done',
+                    'run_id': run_id,
+                    'analyze_drain_complete': True,
+                },
+            )
+            if sub_err:
+                final_status = 'failed'
+                err_msg = sub_err
+            return
+
+        if log_fn:
+            log_fn('[monitor] 收尾补漏 AI 分析（剩余 detail %d 条）' % remaining)
+
+        remaining_budget = float('inf') if timeout_unlimited else max(0, task_deadline - time.monotonic())
         if timeout_unlimited:
             analysis_budget = int(analysis_reserve_sec or budget.get('analysis_timeout_sec') or 3600)
         else:
-            analysis_budget = min(analysis_reserve_sec, remaining)
-            if remaining >= 300:
+            analysis_budget = min(analysis_reserve_sec, remaining_budget)
+            if remaining_budget >= 300:
                 analysis_budget = max(300, analysis_budget)
             else:
-                analysis_budget = max(60, min(analysis_budget, remaining))
+                analysis_budget = max(60, min(analysis_budget, remaining_budget))
         timed_out = False
         timeout_phase = ''
         S.running = True
@@ -1140,6 +1305,7 @@ def run_monitor_task(
             timeout_check=lambda: timeout_check('analyze'),
             shared_pool=shared_pool,
             task=task,
+            detail_only=True,
         )
         if timed_out:
             if user_halt:
